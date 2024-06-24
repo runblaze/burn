@@ -65,7 +65,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [blaze/macos-14, ubuntu-22.04, windows-2022]
+        os: [blaze/macos-14, blaze/ubuntu-22.04-gcp, windows-2022]
         # We support both the latest Rust toolchain and the preceding version.
         rust: [stable, 1.75.0]
         test: ['std', 'no-std', 'examples']
@@ -74,7 +74,7 @@ jobs:
             rust: stable
           - cache: 1-75-0
             rust: 1.75.0
-          - os: ubuntu-22.04
+          - os: blaze/ubuntu-22.04-gcp
             coverage-flags: COVERAGE=1
             rust: stable
             test: std
@@ -214,12 +214,19 @@ jobs:
 
           sudo apt-get update -y -qq
 
-          # vulkan sdk
-          wget -qO - https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo apt-key add -
+          # Debugging: Check the Vulkan SDK version
+          echo "VULKAN_SDK_VERSION: $VULKAN_SDK_VERSION"
+
+          # Add LunarG Vulkan SDK repository and key
+          wget -qO - https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo gpg --dearmor -o /usr/share/keyrings/lunarg-archive-keyring.gpg
           sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-$VULKAN_SDK_VERSION-jammy.list https://packages.lunarg.com/vulkan/$VULKAN_SDK_VERSION/lunarg-vulkan-$VULKAN_SDK_VERSION-jammy.list
 
-          sudo apt-get update
-          sudo apt install -y vulkan-sdk
+          # Fix the repository line to use the signed keyring
+          sudo sed -i 's|^deb |deb [signed-by=/usr/share/keyrings/lunarg-archive-keyring.gpg] |' /etc/apt/sources.list.d/lunarg-vulkan-$VULKAN_SDK_VERSION-jammy.list
+
+          # Update package lists and install Vulkan SDK
+          sudo apt-get update -y -qq
+          sudo apt install -y vulkan-sdk || { echo 'Failed to install Vulkan SDK'; exit 1; }
 
       - name: (linux) install mesa
         # from wgpu repo: https://github.com/gfx-rs/wgpu/blob/trunk/.github/workflows/ci.yml
