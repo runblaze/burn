@@ -6,6 +6,7 @@
 [![Documentation](https://img.shields.io/badge/docs-latest-blue)](https://burn.dev/docs/burn)
 [![Test Status](https://github.com/tracel-ai/burn/actions/workflows/test.yml/badge.svg)](https://github.com/tracel-ai/burn/actions/workflows/test.yml)
 [![CodeCov](https://codecov.io/gh/tracel-ai/burn/branch/main/graph/badge.svg)](https://codecov.io/gh/tracel-ai/burn)
+[![Blaze](https://runblaze.dev/gh/114041730602611213183421653564341667516/badge.svg)](https://runblaze.dev)
 [![Rust Version](https://img.shields.io/badge/Rust-1.75.0+-blue)](https://releases.rs/docs/1.75.0)
 ![license](https://shields.io/badge/license-MIT%2FApache--2.0-blue)
 
@@ -246,7 +247,7 @@ Our ONNX support is further described in
 [this section of the Burn Book 🔥](https://burn.dev/book/import/onnx-model.html).
 
 > **Note**: This crate is in active development and currently supports a
-> [limited set of ONNX operators](./burn-import/SUPPORTED-ONNX-OPS.md).
+> [limited set of ONNX operators](./crates/burn-import/SUPPORTED-ONNX-OPS.md).
 
 </details>
 
@@ -590,9 +591,9 @@ any background. You can ask your questions and share what you built with the com
 
 Before contributing, please take a moment to review our
 [code of conduct](https://github.com/tracel-ai/burn/tree/main/CODE-OF-CONDUCT.md). It's also highly
-recommended to read our
-[architecture document](https://github.com/tracel-ai/burn/tree/main/ARCHITECTURE.md), which explains
-some of our architectural decisions. Refer to out [contributing guide](/CONTRIBUTING.md) for more
+recommended to read the
+[architecture overview](https://github.com/tracel-ai/burn/tree/main/contributor-book/src/project-architecture), which explains
+some of our architectural decisions. Refer to our [contributing guide](/CONTRIBUTING.md) for more
 details.
 
 ## Status

@@ -57,17 +57,14 @@ macro_rules! bench_on_backend {
         let feature_name = "wgpu";
         #[cfg(feature = "wgpu-fusion")]
         let feature_name = "wgpu-fusion";
+        #[cfg(feature = "cuda-jit")]
+        let feature_name = "cuda-jit";
 
         #[cfg(feature = "wgpu")]
         {
-            use burn::backend::wgpu::{AutoGraphicsApi, Wgpu, WgpuDevice};
+            use burn::backend::wgpu::{Wgpu, WgpuDevice};
 
-            bench::<Wgpu<AutoGraphicsApi, f32, i32>>(
-                &WgpuDevice::default(),
-                feature_name,
-                url,
-                token,
-            );
+            bench::<Wgpu<f32, i32>>(&WgpuDevice::default(), feature_name, url, token);
         }
 
         #[cfg(feature = "tch-gpu")]
@@ -128,6 +125,13 @@ macro_rules! bench_on_backend {
 
             let device = CandleDevice::Metal(0);
             bench::<Candle>(&device, feature_name, url, token);
+        }
+
+        #[cfg(feature = "cuda-jit")]
+        {
+            use burn_cuda::{Cuda, CudaDevice};
+
+            bench::<Cuda>(&CudaDevice::default(), feature_name, url, token);
         }
     };
 }

@@ -3,10 +3,13 @@ use std::{
     thread,
 };
 
-use burn_common::reader::Reader;
+use burn_common::{reader::Reader, sync_type::SyncType};
 
 use super::ComputeChannel;
-use crate::server::{ComputeServer, Handle};
+use crate::{
+    server::{Binding, ComputeServer, Handle},
+    storage::ComputeStorage,
+};
 
 /// Create a channel using the [multi-producer, single-consumer channel](mpsc) to communicate with
 /// the compute server spawn on its own thread.
@@ -33,11 +36,15 @@ enum Message<Server>
 where
     Server: ComputeServer,
 {
-    Read(Handle<Server>, Callback<Reader<Vec<u8>>>),
+    Read(Binding<Server>, Callback<Reader<Vec<u8>>>),
+    GetResource(
+        Binding<Server>,
+        Callback<<Server::Storage as ComputeStorage>::Resource>,
+    ),
     Create(Vec<u8>, Callback<Handle<Server>>),
     Empty(usize, Callback<Handle<Server>>),
-    ExecuteKernel(Server::Kernel, Vec<Handle<Server>>),
-    Sync(Callback<()>),
+    ExecuteKernel(Server::Kernel, Vec<Binding<Server>>),
+    Sync(SyncType, Callback<()>),
 }
 
 impl<Server> MpscComputeChannel<Server>
@@ -51,9 +58,12 @@ where
         let _handle = thread::spawn(move || {
             while let Ok(message) = receiver.recv() {
                 match message {
-                    Message::Read(handle, callback) => {
-                        let data = server.read(&handle);
-                        core::mem::drop(handle);
+                    Message::Read(binding, callback) => {
+                        let data = server.read(binding);
+                        callback.send(data).unwrap();
+                    }
+                    Message::GetResource(binding, callback) => {
+                        let data = server.get_resource(binding);
                         callback.send(data).unwrap();
                     }
                     Message::Create(data, callback) => {
@@ -64,11 +74,11 @@ where
                         let handle = server.empty(size);
                         callback.send(handle).unwrap();
                     }
-                    Message::ExecuteKernel(kernel, handles) => {
-                        server.execute(kernel, &handles.iter().collect::<Vec<_>>());
+                    Message::ExecuteKernel(kernel, bindings) => {
+                        server.execute(kernel, bindings);
                     }
-                    Message::Sync(callback) => {
-                        server.sync();
+                    Message::Sync(sync_type, callback) => {
+                        server.sync(sync_type);
                         callback.send(()).unwrap();
                     }
                 };
@@ -93,12 +103,26 @@ impl<Server> ComputeChannel<Server> for MpscComputeChannel<Server>
 where
     Server: ComputeServer + 'static,
 {
-    fn read(&self, handle: &Handle<Server>) -> Reader<Vec<u8>> {
+    fn read(&self, binding: Binding<Server>) -> Reader<Vec<u8>> {
         let (callback, response) = mpsc::channel();
 
         self.state
             .sender
-            .send(Message::Read(handle.clone(), callback))
+            .send(Message::Read(binding, callback))
+            .unwrap();
+
+        self.response(response)
+    }
+
+    fn get_resource(
+        &self,
+        binding: Binding<Server>,
+    ) -> <Server::Storage as ComputeStorage>::Resource {
+        let (callback, response) = mpsc::channel();
+
+        self.state
+            .sender
+            .send(Message::GetResource(binding, callback))
             .unwrap();
 
         self.response(response)
@@ -126,24 +150,19 @@ where
         self.response(response)
     }
 
-    fn execute(&self, kernel: Server::Kernel, handles: &[&Handle<Server>]) {
+    fn execute(&self, kernel: Server::Kernel, bindings: Vec<Binding<Server>>) {
         self.state
             .sender
-            .send(Message::ExecuteKernel(
-                kernel,
-                handles
-                    .iter()
-                    .map(|h| (*h).clone())
-                    .collect::<Vec<Handle<Server>>>(),
-            ))
+            .send(Message::ExecuteKernel(kernel, bindings))
             .unwrap()
     }
 
-    fn sync(&self) {
+    fn sync(&self, sync_type: SyncType) {
         let (callback, response) = mpsc::channel();
-
-        self.state.sender.send(Message::Sync(callback)).unwrap();
-
+        self.state
+            .sender
+            .send(Message::Sync(sync_type, callback))
+            .unwrap();
         self.response(response)
     }
 }

@@ -35,6 +35,7 @@ mod matmul;
 mod maxmin;
 mod maxpool1d;
 mod maxpool2d;
+mod memory_management;
 mod mul;
 mod multithread;
 mod nearest_interpolate;
@@ -44,6 +45,7 @@ mod permute;
 mod pow;
 mod recip;
 mod relu;
+mod repeat;
 mod reshape;
 mod select;
 mod sigmoid;
@@ -68,6 +70,7 @@ macro_rules! testgen_all {
         burn_autodiff::testgen_gradients!();
         burn_autodiff::testgen_bridge!();
         burn_autodiff::testgen_checkpoint!();
+        burn_autodiff::testgen_memory_management!();
 
         // Activation
         burn_autodiff::testgen_ad_relu!();
@@ -126,5 +129,6 @@ macro_rules! testgen_all {
         burn_autodiff::testgen_ad_sign!();
         burn_autodiff::testgen_ad_expand!();
         burn_autodiff::testgen_ad_sort!();
+        burn_autodiff::testgen_ad_repeat!();
     };
 }

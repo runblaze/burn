@@ -1,12 +1,18 @@
 use super::{expand, numeric, permute};
-use crate::codegen::dialect::gpu::{Elem, Item, Operator, Scope, UnaryOperator};
 use crate::kernel::prng::{random_bernoulli, random_normal, random_uniform};
-use crate::{kernel, unary, JitBackend, Runtime};
+use crate::{kernel, unary, FloatElement, IntElement, JitBackend, JitRuntime};
+use burn_cube::ir::{Elem, Item, Operator, Scope, UnaryOperator, Variable};
+use burn_cube::Runtime;
 use burn_tensor::ops::{BoolTensor, Device, FloatTensor, IntElem, IntTensor};
 use burn_tensor::{ops::IntTensorOps, Data, Distribution, ElementConversion, Reader, Shape};
 use std::ops::Range;
 
-impl<R: Runtime> IntTensorOps<Self> for JitBackend<R> {
+impl<R, F, I> IntTensorOps<Self> for JitBackend<R, F, I>
+where
+    R: JitRuntime,
+    F: FloatElement,
+    I: IntElement,
+{
     fn int_empty<const D: usize>(shape: Shape<D>, device: &Device<Self>) -> IntTensor<Self, D> {
         super::empty(shape, device)
     }
@@ -235,6 +241,13 @@ impl<R: Runtime> IntTensorOps<Self> for JitBackend<R> {
         numeric::div_scalar(lhs, rhs)
     }
 
+    fn int_remainder_scalar<const D: usize>(
+        lhs: IntTensor<Self, D>,
+        rhs: IntElem<Self>,
+    ) -> IntTensor<Self, D> {
+        numeric::remainder_scalar(lhs, rhs)
+    }
+
     fn int_zeros<const D: usize>(shape: Shape<D>, device: &Device<Self>) -> IntTensor<Self, D> {
         numeric::zeros(shape, device)
     }
@@ -281,8 +294,8 @@ impl<R: Runtime> IntTensorOps<Self> for JitBackend<R> {
 
     fn int_abs<const D: usize>(tensor: IntTensor<Self, D>) -> IntTensor<Self, D> {
         unary!(
-            operation: |scope: &mut Scope, elem: Elem| Operator::Abs(UnaryOperator {
-                input: scope.read_array(0, Item::Scalar(elem)),
+            operation: |scope: &mut Scope, elem: Elem, position: Variable| Operator::Abs(UnaryOperator {
+                input: scope.read_array(0, Item::new(elem), position),
                 out: scope.create_local(elem),
             }),
             runtime: R,

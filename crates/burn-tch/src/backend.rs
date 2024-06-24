@@ -2,7 +2,9 @@ use crate::PrecisionBridge;
 
 use super::element::TchElement;
 use super::TchTensor;
-use burn_tensor::backend::Backend;
+use burn_tensor::backend::{Backend, DeviceId, DeviceOps, SyncType};
+use burn_tensor::ops::IntTensorOps;
+use burn_tensor::{Int, Tensor};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// The device struct when using the `tch` backend.
@@ -57,6 +59,17 @@ impl From<tch::Device> for LibTorchDevice {
     }
 }
 
+impl DeviceOps for LibTorchDevice {
+    fn id(&self) -> burn_tensor::backend::DeviceId {
+        match self {
+            LibTorchDevice::Cpu => DeviceId::new(0, 0),
+            LibTorchDevice::Cuda(index) => DeviceId::new(1, *index as u32),
+            LibTorchDevice::Mps => DeviceId::new(2, 0),
+            LibTorchDevice::Vulkan => DeviceId::new(3, 0),
+        }
+    }
+}
+
 impl Default for LibTorchDevice {
     fn default() -> Self {
         Self::Cpu
@@ -101,11 +114,21 @@ impl<E: TchElement> Backend for LibTorch<E> {
         "tch".to_string()
     }
 
-    fn sync(device: &Self::Device) {
-        if let LibTorchDevice::Cuda(index) = device {
-            tch::Cuda::synchronize(*index as i64);
-        } else if let LibTorchDevice::Mps = device {
-            panic!("Can't sync MPS device")
+    fn sync(device: &Self::Device, sync_type: SyncType) {
+        if sync_type == SyncType::Wait {
+            match device {
+                LibTorchDevice::Cpu => (),
+                LibTorchDevice::Cuda(index) => {
+                    tch::Cuda::synchronize(*index as i64);
+                }
+                _ => {
+                    // When there is no explicit way to synchronize, we write and read one value to sync
+                    Tensor::<Self, 1, Int>::from_primitive(
+                        <Self as IntTensorOps<Self>>::int_zeros([1].into(), device),
+                    )
+                    .into_data();
+                }
+            }
         }
     }
 }

@@ -20,6 +20,7 @@ use serde::{Serialize, Serializer};
 use crate::check::TensorCheck;
 use crate::tensor::api::chunk::chunk;
 use crate::tensor::api::narrow::narrow;
+use crate::Element;
 use crate::{backend::Backend, check, Bool, Data, DataSerialize, Float, Int, Shape, TensorKind};
 
 /// A tensor with a given backend, shape and data type.
@@ -171,6 +172,60 @@ where
         Tensor::new(K::permute(self.primitive, transformed_axes))
     }
 
+    /// Moves the dimension(s) of input at the position(s) in source to the position(s) in destination.
+    ///
+    /// Other dimensions of input that are not explicitly moved remain in their original order and appear
+    /// at the positions not specified in destination.
+    ///
+    /// # Arguments
+    ///
+    /// * `src` - The dimension(s) to move. The values must be unique and in the range of the number of dimensions.
+    ///              The values can be negative, in which case they are used as an offset from the end.
+    ///
+    /// * `dst` - Destination positions for each of the original dims. These must also be unique.
+    ///
+    /// # Panics
+    ///
+    /// - If the source and destination dimensions are not of the same length.
+    /// - If the source and destination vectors contain duplicate values.
+    /// - If the source and destination vectors contain values that are out of bounds.
+    ///
+    /// # Returns
+    ///
+    /// The tensor with the dimensions moved.
+    // This is a semantic sugar for `permute`. It is used widely enough, so we define a separate Op
+    // for it
+    pub fn movedim<S1: MovedimArgs, S2: MovedimArgs>(self, src: S1, dst: S2) -> Tensor<B, D, K> {
+        let source_dims = src.into_dim_vec::<D>();
+        let destination_dims = dst.into_dim_vec::<D>();
+
+        check!(TensorCheck::movedim_args_length(
+            &source_dims,
+            &destination_dims
+        ));
+
+        let mut m = [-1; D];
+        for (&d, &s) in destination_dims.iter().zip(source_dims.iter()) {
+            m[d] = s as isize;
+        }
+        let mut axes: [isize; D] = [0; D];
+        let mut source_i = 0;
+        for (dest_i, item) in axes.iter_mut().enumerate().take(D) {
+            *item = if m[dest_i] != -1 {
+                m[dest_i]
+            } else {
+                while source_dims.contains(&source_i) {
+                    source_i += 1;
+                }
+                let result = source_i as isize;
+                source_i += 1;
+                result
+            };
+        }
+
+        self.permute(axes)
+    }
+
     /// Reverse the order of elements in the tensor along the given dimensions.
     ///
     /// # Arguments
@@ -266,7 +321,7 @@ where
     ///
     /// # Returns
     ///
-    /// A new `Tensor<B, D2, K>` instance with the specified dimenension removed.
+    /// A new `Tensor<B, D2, K>` instance with the specified dimension removed.
     ///
     /// # Example
     ///
@@ -294,6 +349,95 @@ where
 
         new_dims[..dim].copy_from_slice(&current_dims[..dim]);
         new_dims[dim..].copy_from_slice(&current_dims[dim + 1..]);
+
+        Tensor::new(K::reshape::<D, D2>(self.primitive, new_dims.into()))
+    }
+
+    /// Removes specified dimensions of size 1 from a tensor's shape. This function takes a tensor and
+    /// an array of dimensions (`dims`) to be squeezed. If `dims` is provided, only the dimensions
+    /// specified in this array will be removed. Each dimension in `dims` should correspond to a size of 1
+    /// in the tensor; otherwise, the dimension will not be squeezed. If `dims` is empty, all single-dimensional entries
+    /// in the tensor will be removed. If entries in `dims` are negative, then dimensions will be counted
+    /// from the back.
+    ///
+    /// # Arguments
+    ///
+    /// - `dims`: The dimension(s) to be squeezed.
+    ///
+    /// # Type Parameters
+    ///
+    ///  - 'D2': The resulting number of dimensions in the squeezed tensor.
+    ///
+    /// # Returns
+    ///
+    /// A new `Tensor<B, D2, K>` instance with the specified dimensions removed.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    ///
+    /// use burn_tensor::backend::Backend;
+    /// use burn_tensor::{Tensor, Shape};
+    ///
+    /// fn example<B: Backend>() {
+    ///     let device = Default::default();
+    ///     let tensor = Tensor::<B, 4>::ones(Shape::new([2, 1, 4, 1]), &device);
+    ///
+    ///     // Given a 4D tensor with dimensions (2, 1, 4, 1), squeeze the 1 and 3 dimensions
+    ///     let squeezed_tensor: Tensor::<B, 2> = tensor.squeeze_dims(&[1, 3]);
+    ///
+    ///     // Resulting tensor will have dimensions (2, 4)
+    ///     println!("{:?}", squeezed_tensor.shape());
+    /// }
+    /// ```
+    pub fn squeeze_dims<const D2: usize>(self, dims: &[isize]) -> Tensor<B, D2, K> {
+        let current_dims = self.shape().dims;
+        let mut dim_indices: Vec<usize>;
+
+        // Check if dims is empty, if yes then assign dim_indices all single-dimensional entries
+        if dims.is_empty() {
+            dim_indices = current_dims
+                .iter()
+                .enumerate()
+                .filter_map(|(index, &dim)| if dim == 1 { Some(index) } else { None })
+                .collect();
+        } else {
+            // If negative dims, count from the back
+            dim_indices = dims
+                .iter()
+                .map(|&d| {
+                    if d < 0 {
+                        (current_dims.len() as isize + d) as usize
+                    } else {
+                        d as usize
+                    }
+                })
+                .collect();
+        }
+
+        // Sort indices and remove duplicates
+        dim_indices.sort_unstable();
+        dim_indices.dedup();
+
+        // Make sure squeeze_dims doesn't result in a tensor with < 1 dimensions
+        check!(TensorCheck::squeeze_dims_input::<D2>(
+            &dim_indices,
+            &current_dims
+        ));
+
+        // Calculate new dimensions
+        let mut new_dims = Vec::new();
+        for (index, &dim_size) in current_dims.iter().enumerate() {
+            // Exclude the dimension if it's explicitly marked for squeezing
+            if dim_indices.contains(&index) {
+                check!(TensorCheck::squeeze::<D2>(index, &current_dims));
+                continue;
+            }
+            new_dims.push(dim_size);
+        }
+
+        // Check that after squeezing, we still respect the D2 size
+        check!(TensorCheck::squeeze_dims_len::<D2>(new_dims.len()));
 
         Tensor::new(K::reshape::<D, D2>(self.primitive, new_dims.into()))
     }
@@ -564,10 +708,6 @@ where
     }
 
     /// Repeat the tensor along the given dimension.
-    ///
-    /// # Panics
-    ///
-    /// If the selected dimension more than one item.
     pub fn repeat(self, dim: usize, times: usize) -> Self {
         Self::new(K::repeat(self.primitive, dim, times))
     }
@@ -1074,7 +1214,7 @@ impl<B: Backend, const D: usize> core::ops::BitXor<T> for Tensor<B, D> {
 /// This is an internal trait, use the public API provided by [tensor struct](Tensor).
 pub trait BasicOps<B: Backend>: TensorKind<B> {
     /// The type of the tensor elements.
-    type Elem: 'static + Copy;
+    type Elem: Element;
 
     /// Creates an empty tensor with the given shape.
     ///
@@ -1895,6 +2035,67 @@ impl<B: Backend> BasicOps<B> for Bool {
 
     fn flip<const D: usize>(tensor: Self::Primitive<D>, axes: &[usize]) -> Self::Primitive<D> {
         B::bool_flip(tensor, axes)
+    }
+}
+
+/// Trait used for movedim arguments
+pub trait MovedimArgs {
+    /// Converts into a set of dimensions `Vec<usize>` for the `tensor.movedim()` function
+    fn into_dim_vec<const D: usize>(self) -> Vec<usize>;
+}
+
+impl MovedimArgs for Vec<i32> {
+    fn into_dim_vec<const D: usize>(self) -> Vec<usize> {
+        let set = self
+            .iter()
+            .map(|&dim| {
+                if dim < 0 {
+                    (D as i32 + dim) as usize
+                } else {
+                    dim as usize
+                }
+            })
+            .collect::<Vec<usize>>();
+        check!(TensorCheck::movedim_args_vec::<D>(&set));
+
+        set
+    }
+}
+
+impl MovedimArgs for Vec<usize> {
+    fn into_dim_vec<const D: usize>(self) -> Vec<usize> {
+        check!(TensorCheck::movedim_args_vec::<D>(&self));
+        self
+    }
+}
+
+impl MovedimArgs for usize {
+    #[allow(clippy::vec_init_then_push)]
+    fn into_dim_vec<const D: usize>(self) -> Vec<usize> {
+        check!(TensorCheck::movedim_args_usize::<D>(self));
+
+        let mut set = Vec::with_capacity(1);
+        set.push(self);
+
+        set
+    }
+}
+
+impl MovedimArgs for i32 {
+    #[allow(clippy::vec_init_then_push)]
+    fn into_dim_vec<const D: usize>(self) -> Vec<usize> {
+        check!(TensorCheck::movedim_args_i32::<D>(self));
+
+        let dim = if self < 0 {
+            (D as i32 + self) as usize
+        } else {
+            self as usize
+        };
+
+        let mut set = Vec::with_capacity(1);
+        set.push(dim);
+
+        set
     }
 }
 

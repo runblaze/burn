@@ -1,11 +1,12 @@
 use burn::nn::{
-    conv::Conv1dConfig,
-    conv::{Conv2dConfig, ConvTranspose2dConfig},
-    pool::{AvgPool2dConfig, MaxPool2dConfig},
-    BatchNormConfig, DropoutConfig, LinearConfig, PaddingConfig1d, PaddingConfig2d,
+    conv::{Conv1dConfig, Conv2dConfig, ConvTranspose2dConfig},
+    pool::{AvgPool1dConfig, AvgPool2dConfig, MaxPool1dConfig, MaxPool2dConfig},
+    BatchNormConfig, DropoutConfig, LayerNormConfig, LinearConfig, PaddingConfig1d,
+    PaddingConfig2d,
 };
 
 use super::ir::{ArgType, AttributeValue, Data, Node};
+use crate::burn::node::resize::ResizeMode;
 
 /// Create a Conv1dConfig from the attributes of the node
 pub fn conv1d_config(curr: &Node) -> Conv1dConfig {
@@ -97,6 +98,33 @@ pub fn conv2d_config(curr: &Node) -> Conv2dConfig {
 }
 
 /// Create a MaxPool2dConfig from the attributes of the node
+pub fn max_pool1d_config(curr: &Node) -> MaxPool1dConfig {
+    let mut kernel_shape = Vec::new();
+    let mut stride = vec![1];
+    let mut pads = vec![0, 0];
+    let mut dilation = vec![1];
+
+    for (key, value) in curr.attrs.iter() {
+        match key.as_str() {
+            "kernel_shape" => kernel_shape = value.clone().into_i64s(),
+            "strides" => stride = value.clone().into_i64s(),
+            "pads" => pads = value.clone().into_i64s(),
+            "dilations" => dilation = value.clone().into_i64s(),
+            _ => {}
+        }
+    }
+    assert_eq!(kernel_shape.len(), 1);
+    assert_eq!(dilation.len(), 1);
+    assert_eq!(stride.len(), 1);
+    let padding = padding_config_1d(&pads);
+
+    MaxPool1dConfig::new(kernel_shape[0] as usize)
+        .with_stride(stride[0] as usize)
+        .with_padding(padding)
+        .with_dilation(dilation[0] as usize)
+}
+
+/// Create a MaxPool2dConfig from the attributes of the node
 pub fn max_pool2d_config(curr: &Node) -> MaxPool2dConfig {
     let mut kernel_shape = Vec::new();
     let mut strides = vec![1, 1];
@@ -120,7 +148,6 @@ pub fn max_pool2d_config(curr: &Node) -> MaxPool2dConfig {
         .with_padding(padding)
         .with_dilation([dilations[0] as usize, dilations[1] as usize])
 }
-
 pub fn conv_transpose2d_config(curr: &Node) -> ConvTranspose2dConfig {
     let mut attrs = curr.attrs.clone();
     let kernel_shape = attrs
@@ -174,6 +201,37 @@ pub fn conv_transpose2d_config(curr: &Node) -> ConvTranspose2dConfig {
     .with_bias(bias)
 }
 
+pub fn avg_pool1d_config(curr: &Node) -> AvgPool1dConfig {
+    let mut kernel_shape = Vec::new();
+    let mut strides = vec![1];
+    let mut pads = vec![0, 0];
+    let mut count_include_pad: i64 = 0;
+    let mut ceil_mode: i64 = 0;
+
+    for (key, value) in curr.attrs.iter() {
+        match key.as_str() {
+            "kernel_shape" => kernel_shape = value.clone().into_i64s(),
+            "strides" => strides = value.clone().into_i64s(),
+            "pads" => pads = value.clone().into_i64s(),
+            "count_include_pad" => count_include_pad = value.clone().into_i64(),
+            "ceil_mode" => ceil_mode = value.clone().into_i64(),
+            _ => {}
+        }
+    }
+    assert_eq!(kernel_shape.len(), 1);
+    assert_eq!(strides.len(), 1);
+
+    if ceil_mode == 1 {
+        panic!("ceil_mode is not supported");
+    }
+
+    let padding = padding_config_1d(&pads);
+
+    AvgPool1dConfig::new(kernel_shape[0] as usize)
+        .with_stride(strides[0] as usize)
+        .with_padding(padding)
+        .with_count_include_pad(count_include_pad == 1)
+}
 /// Create a AvgPool2dConfig from the attributes of the node
 pub fn avg_pool2d_config(curr: &Node) -> AvgPool2dConfig {
     let mut kernel_shape = Vec::new();
@@ -203,6 +261,21 @@ pub fn avg_pool2d_config(curr: &Node) -> AvgPool2dConfig {
         .with_strides([strides[0] as usize, strides[1] as usize])
         .with_padding(padding)
         .with_count_include_pad(count_include_pad == 1)
+}
+
+pub fn expand_config(node: &Node) -> Vec<i64> {
+    let input_value = &node.inputs[1].value;
+    match &node.inputs[1].ty {
+        ArgType::Tensor(tensor) => {
+            assert_eq!(tensor.dim, 1, "Expand: shape tensor must be 1D");
+            if let Some(Data::Int64s(shape)) = input_value.as_ref() {
+                shape.clone()
+            } else {
+                panic!("Tensor data type must be int64")
+            }
+        }
+        _ => panic!("Only tensor input is valid for shape"),
+    }
 }
 
 /// Create a FlattenConfig from the attributes of the node
@@ -411,6 +484,58 @@ pub fn softmax_config(node: &Node) -> usize {
     axis as usize
 }
 
+/// Create argmax config from the attributes of the node
+pub fn argmax_config(node: &Node) -> usize {
+    let mut axis: i64 = 0;
+
+    // check if the node has only one input
+    if node.inputs.len() != 1 {
+        panic!(
+            "Argmax: multiple inputs are not supported (got {:?})",
+            node.inputs.len()
+        );
+    }
+
+    // extract the shape of the input tensor
+    let tensor = match node.inputs.first().unwrap().clone().ty {
+        ArgType::Tensor(tensor) => tensor,
+        _ => panic!("Only tensor input is valid"),
+    };
+
+    // extract the attributes
+    for (key, value) in node.attrs.iter() {
+        match key.as_str() {
+            "axis" => axis = value.clone().into_i64(),
+            "select_last_index" => {
+                // not all params are supported in burn
+                if value.clone().into_i64() != 0 {
+                    log::warn!(
+                        "only select_last_index=0 is supported for argmax in burn. Ignoring supplied value (got {:?})",
+                        value
+                    );
+                }
+            }
+            "keepdims" => {
+                // not all params are supported in burn
+                if value.clone().into_i64() != 1 {
+                    panic!(
+                        "Only keepdims=1 is supported for argmax in burn (got {:?})",
+                        value
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // if axis is negative, it is counted from the end
+    if axis < 0 {
+        axis += tensor.dim as i64;
+    }
+
+    axis as usize
+}
+
 /// Create concat config from the attributes of the node
 pub fn concat_config(node: &Node) -> usize {
     // the axis is the last dimension (Default: 1 per ONNX spec)
@@ -463,6 +588,42 @@ pub fn batch_norm_config(node: &Node) -> BatchNormConfig {
     BatchNormConfig::new(num_features)
         .with_epsilon(epsilon as f64)
         .with_momentum(momentum as f64)
+}
+
+/// Create a LayerNormConfig from the attributes of the node
+pub fn layer_norm_config(node: &Node) -> (LayerNormConfig, bool) {
+    // Extract the shape of the weight tensor
+    let tensor_type = if let ArgType::Tensor(ref tensor_type) = node.inputs[1].ty {
+        tensor_type
+    } else {
+        panic!("LayerNorm: weight tensor must be present");
+    };
+
+    let num_features: usize = tensor_type.shape.clone().unwrap()[0];
+
+    // When `stash_type` is `1` (default), perform operations in 32-bit float and
+    // cast the results back to original dtype
+    let mut stash_type = 1;
+    let mut axis = -1;
+    let mut epsilon = 1e-5;
+
+    for (key, value) in node.attrs.iter() {
+        match key.as_str() {
+            "axis" => axis = value.clone().into_i64(),
+            "epsilon" => epsilon = value.clone().into_f32(),
+            "stash_type" => stash_type = value.clone().into_i64(),
+            _ => {}
+        }
+    }
+
+    if axis != -1 && axis != tensor_type.dim as i64 - 1 {
+        panic!("LayerNorm: normalization is only supported on the last axis right now")
+    }
+
+    (
+        LayerNormConfig::new(num_features).with_epsilon(epsilon as f64),
+        stash_type == 1,
+    )
 }
 
 /// Calculate the padding configuration for a 2D operations such as Convolution and Pooling.
@@ -533,8 +694,9 @@ pub fn reshape_config(node: &Node) -> Vec<i64> {
         panic!("Zero shape size is not supported");
     }
 
+    // TODO: check "shape" attribute
     if node.inputs.len() != 2 || node.inputs[1].value.is_none() {
-        panic!("Reshape: shape tensor must be present");
+        panic!("Reshape: shape tensor must be present for {:?}", node);
     }
 
     let input_value = &node.inputs[1].value;
@@ -552,9 +714,44 @@ pub fn reshape_config(node: &Node) -> Vec<i64> {
     }
 }
 
+pub fn resize_config(node: &Node) -> ResizeMode {
+    let mut mode: String = "".to_string();
+    for (key, value) in node.attrs.iter() {
+        match key.as_str() {
+            "coordinate_transformation_mode" => {}
+            "cubic_coeff_a" => {}
+            "mode" => mode = value.clone().into_string(),
+            "nearest_mode" => {}
+            _ => {}
+        }
+    }
+
+    let mode = match mode.as_str() {
+        "nearest" => ResizeMode::Nearest,
+        "linear" => ResizeMode::Linear,
+        "cubic" => ResizeMode::Cubic,
+        _ => panic!("Resize: invalid mode string, must be 'nearest', 'linear', or 'cubic'"),
+    };
+
+    mode
+}
+
 //Note this function should only execute if the second input is a constant
 //if it wasn't and the output shape was known, unsqueeze has been remapped to reshape
 pub fn unsqueeze_config(node: &Node) -> Vec<i64> {
+    // Check if axes attribute exists
+    for (key, value) in node.attrs.iter() {
+        match key.as_str() {
+            "axes" => return value.clone().into_i64s(),
+            _ => {}
+        }
+    }
+
+    assert!(
+        !node.inputs.is_empty(),
+        "Unsqueeze: axes tensor must be present"
+    );
+
     let input_value = &node.inputs[1];
 
     match &node.inputs[1].ty {
@@ -659,4 +856,333 @@ fn padding_config_1d(pads: &[i64]) -> PaddingConfig1d {
         // Unaccounted for padding configuration
         panic!("Padding configuration ({:?}) not supported", pads);
     }
+}
+
+pub fn reduce_max_config(node: &Node) -> Option<usize> {
+    let mut axes = Vec::new();
+    let mut keepdims = 1;
+
+    let tensor = match node.inputs.first().unwrap().clone().ty {
+        ArgType::Tensor(tensor) => tensor,
+        _ => panic!("Only tensor input is valid"),
+    };
+
+    // Extract the attributes
+    for (key, value) in node.attrs.iter() {
+        match key.as_str() {
+            "axes" => axes = value.clone().into_i64s(),
+            "keepdims" => keepdims = value.clone().into_i64(),
+            _ => {}
+        }
+    }
+
+    if axes.len() > 1 {
+        panic!("ReduceMax: reducing on multiple dimensions is not supported")
+    }
+
+    if axes.is_empty() && keepdims == 1 {
+        panic!("ReduceMax: axes must be provided with keepdims")
+    }
+
+    if !axes.is_empty() && keepdims == 0 {
+        // Not supported in Burn
+        panic!("ReduceMax: the reduce operation must preserve the reduced dimension")
+    }
+
+    if axes.is_empty() {
+        None
+    } else {
+        let mut dim = axes[0];
+
+        if dim < 0 {
+            // Accepted range is [-r, r-1] where r = rank(data) but Burn only supports positive dim
+            dim += tensor.dim as i64;
+        }
+        Some(dim as usize)
+    }
+}
+
+pub fn reduce_min_config(node: &Node) -> Option<usize> {
+    let mut axes = Vec::new();
+    let mut keepdims = 1;
+
+    let tensor = match node.inputs.first().unwrap().clone().ty {
+        ArgType::Tensor(tensor) => tensor,
+        _ => panic!("Only tensor input is valid"),
+    };
+
+    // Extract the attributes
+    for (key, value) in node.attrs.iter() {
+        match key.as_str() {
+            "axes" => axes = value.clone().into_i64s(),
+            "keepdims" => keepdims = value.clone().into_i64(),
+            _ => {}
+        }
+    }
+
+    if axes.len() > 1 {
+        panic!("ReduceMin: reducing on multiple dimensions is not supported")
+    }
+
+    if axes.is_empty() && keepdims == 1 {
+        panic!("ReduceMin: axes must be provided with keepdims")
+    }
+
+    if !axes.is_empty() && keepdims == 0 {
+        panic!("ReduceMin: the reduce operation must preserve the reduced dimension")
+    }
+
+    if axes.is_empty() {
+        None
+    } else {
+        let mut dim = axes[0];
+
+        if dim < 0 {
+            dim += tensor.dim as i64;
+        }
+        Some(dim as usize)
+    }
+}
+
+pub fn reduce_mean_config(node: &Node) -> Option<usize> {
+    let mut axes = Vec::new();
+    let mut keepdims = 1;
+
+    let tensor = match node.inputs.first().unwrap().clone().ty {
+        ArgType::Tensor(tensor) => tensor,
+        _ => panic!("Only tensor input is valid"),
+    };
+
+    // Extract the attributes
+    for (key, value) in node.attrs.iter() {
+        match key.as_str() {
+            "axes" => axes = value.clone().into_i64s(),
+            "keepdims" => keepdims = value.clone().into_i64(),
+            _ => {}
+        }
+    }
+
+    if axes.len() > 1 {
+        panic!("ReduceMean: reducing on multiple dimensions is not supported")
+    }
+
+    if axes.is_empty() && keepdims == 1 {
+        panic!("ReduceMean: axes must be provided with keepdims")
+    }
+
+    if !axes.is_empty() && keepdims == 0 {
+        // Not supported in Burn
+        panic!("ReduceMean: the reduce operation must preserve the reduced dimension")
+    }
+
+    if axes.is_empty() {
+        None
+    } else {
+        let mut dim = axes[0];
+
+        if dim < 0 {
+            // Accepted range is [-r, r-1] where r = rank(data) but Burn only supports positive dim
+            dim += tensor.dim as i64;
+        }
+        Some(dim as usize)
+    }
+}
+
+pub fn reduce_sum_config(node: &Node) -> Option<usize> {
+    let mut axes = Vec::new();
+    let mut keepdims = 1;
+
+    let tensor = match node.inputs.first().unwrap().clone().ty {
+        ArgType::Tensor(tensor) => tensor,
+        _ => panic!("Only tensor input is valid"),
+    };
+
+    // Extract the attributes
+    for (key, value) in node.attrs.iter() {
+        match key.as_str() {
+            "keepdims" => keepdims = value.clone().into_i64(),
+            "axes" => axes = value.clone().into_i64s(),
+            // TODO: handle noop_with_empty_axes
+            _ => {}
+        }
+    }
+
+    // TODO: Handle case where axes are passed in. Will require its own ReduceSumNode instead of a UnaryNode.
+    if let Some(value) = node
+        .inputs
+        .get(1)
+        .and_then(|argument| argument.value.as_ref())
+    {
+        axes = value.clone().into_i64s();
+    }
+
+    if axes.len() > 1 {
+        panic!("ReduceMean: reducing on multiple dimensions is not supported")
+    }
+
+    if axes.is_empty() && keepdims == 1 {
+        panic!("ReduceMean: axes must be provided with keepdims")
+    }
+
+    if !axes.is_empty() && keepdims == 0 {
+        // Not supported in Burn
+        panic!("ReduceMean: the reduce operation must preserve the reduced dimension")
+    }
+
+    if axes.is_empty() {
+        None
+    } else {
+        let mut dim = axes[0];
+
+        if dim < 0 {
+            // Accepted range is [-r, r-1] where r = rank(data) but Burn only supports positive dim
+            dim += tensor.dim as i64;
+        }
+        Some(dim as usize)
+    }
+}
+
+pub fn shape_config(curr: &Node) -> (usize, usize) {
+    if curr.inputs.len() != 1 {
+        panic!(
+            "Shape: multiple inputs are not supported (got {:?})",
+            curr.inputs.len()
+        );
+    }
+
+    // Extract the shape of the input tensor
+    let tensor = match curr.inputs.first().unwrap().clone().ty {
+        ArgType::Tensor(tensor) => tensor,
+        _ => panic!("Only tensor input is valid"),
+    };
+
+    // Default: all axes up to the last one (included)
+    let mut start_dim: i64 = 0;
+    let mut end_dim: i64 = tensor.dim as i64;
+
+    // Extract the attributes
+    for (key, value) in curr.attrs.iter() {
+        match key.as_str() {
+            "start" => start_dim = value.clone().into_i64(),
+            "end" => end_dim = value.clone().into_i64(),
+            _ => {}
+        }
+    }
+
+    // If dim is negative, it is counted from the end
+    if start_dim < 0 {
+        start_dim += tensor.dim as i64;
+    }
+    if end_dim < 0 {
+        end_dim += tensor.dim as i64;
+    }
+
+    (start_dim as usize, end_dim as usize)
+}
+
+pub fn slice_config(node: &Node) -> (Vec<usize>, Vec<usize>) {
+    let start_value = &node.inputs[1].value;
+    let end_value = &node.inputs[2].value;
+
+    let starts = match &node.inputs[1].ty {
+        ArgType::Tensor(tensor) => {
+            assert_eq!(tensor.dim, 1, "Slice: ends tensor must be 1D");
+            if let Some(Data::Int64s(shape)) = start_value.as_ref() {
+                shape
+                    .iter()
+                    .map(|x| {
+                        assert!(*x >= 0, "Slice: start must be positive");
+                        *x as usize
+                    })
+                    .collect()
+            } else {
+                panic!("Tensor data type must be int64")
+            }
+        }
+        _ => panic!("Only tensor input is valid for shape"),
+    };
+
+    let ends = match &node.inputs[2].ty {
+        ArgType::Tensor(tensor) => {
+            assert_eq!(tensor.dim, 1, "Slice: ends tensor must be 1D");
+            if let Some(Data::Int64s(shape)) = end_value.as_ref() {
+                shape
+                    .iter()
+                    .map(|x| {
+                        assert!(*x >= 0, "Slice: end must be positive");
+                        *x as usize
+                    })
+                    .collect()
+            } else {
+                panic!("Tensor data type must be int64")
+            }
+        }
+        _ => panic!("Only tensor input is valid for shape"),
+    };
+
+    for (key, value) in node.attrs.iter() {
+        match key.as_str() {
+            "axes" => {
+                let mut i = 0;
+                value.clone().into_i64s().iter().for_each(|x| {
+                    assert_eq!(*x, i, "Slice: axes must be consecutive");
+                    i += 1;
+                })
+            }
+            "steps" => value.clone().into_i64s().into_iter().for_each(|x| {
+                if x != 1 {
+                    panic!("Slice: steps other than 1 are not supported");
+                }
+            }),
+            _ => {}
+        }
+    }
+
+    (starts, ends)
+}
+
+pub fn transpose_config(curr: &Node) -> Vec<i64> {
+    if curr.inputs.len() != 1 {
+        panic!(
+            "Transpose: multiple inputs are not supported (got {:?})",
+            curr.inputs.len()
+        );
+    }
+
+    // Extract the shape of the input tensor
+    let tensor = match curr.inputs.first().unwrap().clone().ty {
+        ArgType::Tensor(tensor) => tensor,
+        _ => panic!("Only tensor input is valid"),
+    };
+
+    // Default: reverse the dimensions
+    let mut perm = (0..tensor.dim as i64).rev().collect::<Vec<i64>>();
+
+    if let Some(axes) = curr.attrs.get("perm") {
+        perm = axes.clone().into_i64s();
+    }
+
+    perm
+}
+
+pub fn squeeze_config(curr: &Node) -> Vec<i64> {
+    let axes = curr
+        .attrs
+        .iter()
+        .filter_map(|(key, value)| {
+            if key == "axes" {
+                Some(value.clone().into_i64s())
+            } else {
+                None
+            }
+        })
+        .next()
+        .unwrap_or_else(Vec::new);
+
+    match curr.inputs.first().unwrap().clone().ty {
+        ArgType::Tensor(tensor) => tensor,
+        _ => panic!("Only tensor input is valid"),
+    };
+
+    axes
 }

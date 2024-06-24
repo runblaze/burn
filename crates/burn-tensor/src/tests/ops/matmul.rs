@@ -49,6 +49,32 @@ mod tests {
     }
 
     #[test]
+    fn test_matmul_broadcast_4d() {
+        let device = Default::default();
+        // [2, 1, 2, 2]
+        let tensor_1 = TestTensor::from_floats(
+            [[[[1.0, 7.0], [2.0, 3.0]]], [[[2.0, 5.0], [6.0, 3.0]]]],
+            &device,
+        );
+        // [1, 2, 2, 2]
+        let tensor_2 = TestTensor::from_floats(
+            [[[[9.0, 8.0], [1.0, 4.0]], [[2.0, 7.0], [3.0, 5.0]]]],
+            &device,
+        );
+
+        // [2, 1, 2, 2] @ [1, 2, 2, 2] -> [2, 2, 2, 2]
+        let tensor_3 = tensor_1.matmul(tensor_2);
+
+        assert_eq!(
+            tensor_3.into_data(),
+            Data::from([
+                [[[16.0, 36.0], [21.0, 28.0]], [[23.0, 42.0], [13.0, 29.0]]],
+                [[[23.0, 36.0], [57.0, 60.0]], [[19.0, 39.0], [21.0, 57.0]]]
+            ])
+        )
+    }
+
+    #[test]
     fn test_matmul_simple_1() {
         let device = Default::default();
         let tensor_1 = TestTensor::from_floats([[5.0, 14.0], [14.0, 50.0]], &device);
@@ -59,6 +85,26 @@ mod tests {
         assert_eq!(
             tensor_3.into_data(),
             Data::from([[15.0, 34.0, 53.0], [42.0, 106.0, 170.0]])
+        );
+    }
+
+    #[test]
+    fn test_matmul_tmp() {
+        let device = Default::default();
+        let tensor_1 = TestTensor::from_floats(
+            [[0., 1., 2., 3.], [4., 5., 6., 7.], [8., 9., 10., 11.]],
+            &device,
+        );
+        let tensor_2 = TestTensor::from_floats(
+            [[0., 1., 2.], [4., 5., 6.], [8., 9., 10.], [12., 13., 14.]],
+            &device,
+        );
+
+        let tensor_3 = tensor_1.matmul(tensor_2);
+
+        assert_eq!(
+            tensor_3.into_data(),
+            Data::from([[56., 62., 68.], [152., 174., 196.], [248., 286., 324.]])
         );
     }
 

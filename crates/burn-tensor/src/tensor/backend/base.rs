@@ -1,9 +1,10 @@
 use alloc::string::String;
+pub use burn_common::sync_type::SyncType;
 
 use crate::ops::*;
 use crate::tensor::Element;
 
-use super::BackendBridge;
+use super::{BackendBridge, DeviceOps};
 
 /// This trait defines all types and functions needed for a backend to be used with burn.
 ///
@@ -66,7 +67,7 @@ pub trait Backend:
     + 'static
 {
     /// Device type.
-    type Device: Clone + Default + PartialEq + core::fmt::Debug + Send + Sync;
+    type Device: DeviceOps;
 
     /// A bridge that can cast tensors to full precision.
     type FullPrecisionBridge: BackendBridge<Self> + 'static;
@@ -96,7 +97,7 @@ pub trait Backend:
     fn seed(seed: u64);
 
     /// Sync the backend, ensure that all computation are finished.
-    fn sync(_device: &Self::Device) {}
+    fn sync(_device: &Self::Device, _sync_type: SyncType) {}
 }
 
 /// Trait that allows a backend to support autodiff.

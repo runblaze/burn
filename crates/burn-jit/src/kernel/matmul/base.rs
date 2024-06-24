@@ -1,8 +1,7 @@
-use std::cmp::{max, min};
-
+use crate::{tensor::JitTensor, FloatElement, JitRuntime};
+use burn_cube::{prelude::*, Compiler};
 use burn_tensor::Shape;
-
-use crate::{compute::WorkGroup, tensor::JitTensor, Compiler, JitElement, Runtime};
+use std::cmp::{max, min};
 
 use super::{
     init_matmul_output, matmul_autotune, matmul_simple, matmul_tiling_2d, matmul_tiling_2d_padded,
@@ -25,11 +24,13 @@ pub struct Tiling2dConfig {
     pub tile_size_m: usize,
     /// Tile size along dimension of rhs
     pub tile_size_n: usize,
+    /// Loop unrolling
+    pub unroll: bool,
 }
 
 impl Tiling2dConfig {
-    #[allow(unused)]
-    fn new<R: Runtime>(
+    #[allow(unused, clippy::too_many_arguments)]
+    fn new<R: JitRuntime>(
         grid_x: usize,
         grid_y: usize,
         block_size_m: usize,
@@ -37,6 +38,7 @@ impl Tiling2dConfig {
         block_size_n: usize,
         tile_size_m: usize,
         tile_size_n: usize,
+        unroll: bool,
     ) -> Self {
         assert!(grid_x == f32::ceil(block_size_m as f32 / tile_size_m as f32) as usize);
         assert!(grid_y == f32::ceil(block_size_n as f32 / tile_size_n as f32) as usize);
@@ -61,6 +63,7 @@ impl Tiling2dConfig {
             block_size_n,
             tile_size_m,
             tile_size_n,
+            unroll,
         }
     }
 }
@@ -75,12 +78,12 @@ impl Default for Tiling2dConfig {
             block_size_n: 64,
             tile_size_m: 4,
             tile_size_n: 4,
+            unroll: false,
         }
     }
 }
 
 /// The strategy to be used when launching a matmul kernel.
-#[derive(Default)]
 pub enum MatmulStrategy {
     /// A simple kernel will be used with memory coalescing optimization.
     Simple {
@@ -95,20 +98,26 @@ pub enum MatmulStrategy {
     Tiling2dPadded(Tiling2dConfig),
     #[cfg(feature = "autotune")]
     /// Using autotune to chose the best kernel based on runtime information.
-    #[default]
     Autotune,
 }
 
+#[allow(clippy::derivable_impls)] // Necessary otherwise the feature flags dont' work.
 #[cfg(feature = "autotune")]
+impl Default for MatmulStrategy {
+    fn default() -> Self {
+        MatmulStrategy::Autotune
+    }
+}
+
 #[cfg(not(feature = "autotune"))]
 impl Default for MatmulStrategy {
     fn default() -> Self {
-        MatmulStrategy::Tiling2d
+        MatmulStrategy::Tiling2d(Tiling2dConfig::default())
     }
 }
 
 /// Launch a matmul kernel using the given strategy.
-pub fn matmul<R: Runtime, E: JitElement, const D: usize>(
+pub fn matmul<R: JitRuntime, E: FloatElement, const D: usize>(
     lhs: JitTensor<R, E, D>,
     rhs: JitTensor<R, E, D>,
     strategy: MatmulStrategy,
@@ -137,7 +146,7 @@ pub(crate) fn simple_launch_options<const D: usize>(
     output_shape: &Shape<D>,
     workgroup_size_x: usize,
     workgroup_size_y: usize,
-) -> WorkGroup {
+) -> CubeCount {
     let num_rows = lhs_shape.dims[D - 2];
     let num_cols = rhs_shape.dims[D - 1];
 
@@ -149,13 +158,13 @@ pub(crate) fn simple_launch_options<const D: usize>(
         num_iter *= output_shape.dims[i];
     }
 
-    WorkGroup::new(blocks_needed_in_x, blocks_needed_in_y, num_iter as u32)
+    CubeCount::new(blocks_needed_in_x, blocks_needed_in_y, num_iter as u32)
 }
 
 pub(crate) fn tiling2d_launch_options<const D: usize>(
     output_shape: &Shape<D>,
     config: Tiling2dConfig,
-) -> WorkGroup {
+) -> CubeCount {
     let num_rows = output_shape.dims[D - 2];
     let num_cols = output_shape.dims[D - 1];
 
@@ -167,5 +176,5 @@ pub(crate) fn tiling2d_launch_options<const D: usize>(
         num_iter *= output_shape.dims[i];
     }
 
-    WorkGroup::new(blocks_needed_in_x, blocks_needed_in_y, num_iter as u32)
+    CubeCount::new(blocks_needed_in_x, blocks_needed_in_y, num_iter as u32)
 }

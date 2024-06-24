@@ -21,7 +21,6 @@ use burn_tensor::{
 };
 
 use super::maxmin::MaxMinDim;
-use super::sort::SortDim;
 
 impl<B: Backend, C: CheckpointStrategy> FloatTensorOps<Self> for Autodiff<B, C> {
     fn float_from_data<const D: usize>(
@@ -40,11 +39,11 @@ impl<B: Backend, C: CheckpointStrategy> FloatTensorOps<Self> for Autodiff<B, C> 
     }
 
     fn float_zeros<const D: usize>(shape: Shape<D>, device: &Device<Self>) -> FloatTensor<Self, D> {
-        Self::float_from_data(Data::zeros(shape), device)
+        AutodiffTensor::new(B::float_zeros(shape, device))
     }
 
     fn float_ones<const D: usize>(shape: Shape<D>, device: &Device<Self>) -> FloatTensor<Self, D> {
-        Self::float_from_data(Data::ones(shape), device)
+        AutodiffTensor::new(B::float_ones(shape, device))
     }
 
     fn float_shape<const D: usize>(tensor: &FloatTensor<Self, D>) -> Shape<D> {
@@ -465,6 +464,36 @@ impl<B: Backend, C: CheckpointStrategy> FloatTensorOps<Self> for Autodiff<B, C> 
             OpsKind::Tracked(prep) => prep.finish(rhs, B::float_div_scalar(lhs.primitive, rhs)),
             OpsKind::UnTracked(prep) => prep.finish(B::float_div_scalar(lhs.primitive, rhs)),
         }
+    }
+
+    fn float_remainder_scalar<const D: usize>(
+        lhs: FloatTensor<Self, D>,
+        rhs: FloatElem<B>,
+    ) -> FloatTensor<Self, D> {
+        #[derive(Debug)]
+        struct RemainderScalar;
+
+        retro_unary_scalar!(RetroRemainderScalar, B::float_remainder_scalar);
+
+        impl<B: Backend, const D: usize> Backward<B, D, 1> for RemainderScalar {
+            type State = ();
+
+            fn backward(
+                self,
+                ops: Ops<Self::State, 1>,
+                grads: &mut Gradients,
+                _checkpointer: &mut Checkpointer,
+            ) {
+                unary::<B, D, D, _>(ops.parents, ops.node, grads, |grad| grad);
+            }
+        }
+
+        RemainderScalar
+            .prepare::<C>([lhs.node.clone()])
+            .memory_bound()
+            .retro_forward(RetroRemainderScalar::<B, D>::new(lhs.node.id, rhs))
+            .parents([&lhs])
+            .stateless(B::float_remainder_scalar(lhs.primitive, rhs))
     }
 
     fn float_matmul<const D: usize>(
@@ -1028,7 +1057,7 @@ impl<B: Backend, C: CheckpointStrategy> FloatTensorOps<Self> for Autodiff<B, C> 
         }
 
         impl<B: Backend, const D: usize> Backward<B, D, 2> for IndexSelectDimAssign<D> {
-            type State = (usize, IntTensor<B, 1>, Shape<D>, Shape<D>, B::Device);
+            type State = (usize, IntTensor<B, 1>);
 
             fn backward(
                 self,
@@ -1036,21 +1065,14 @@ impl<B: Backend, C: CheckpointStrategy> FloatTensorOps<Self> for Autodiff<B, C> 
                 grads: &mut Gradients,
                 _checkpointer: &mut Checkpointer,
             ) {
-                let (dim, indices, shape_lhs, shape_rhs, device) = ops.state;
-                let [indices_4lhs, indices_4rhs] = duplicate(&ops.parents, Some(indices));
+                let (dim, indices) = ops.state;
 
                 binary::<B, D, D, D, _, _>(
                     ops.parents,
                     ops.node,
                     grads,
-                    |grad| {
-                        let zeros = B::float_zeros(shape_lhs, &device);
-                        B::float_select_assign(grad, dim, indices_4lhs.unwrap(), zeros)
-                    },
-                    |grad| {
-                        let zeros = B::float_zeros(shape_rhs, &device);
-                        B::float_select_assign(zeros, dim, indices_4rhs.unwrap(), grad)
-                    },
+                    |grad| grad,
+                    |grad| B::float_select(grad, dim, indices),
                 );
             }
         }
@@ -1068,13 +1090,7 @@ impl<B: Backend, C: CheckpointStrategy> FloatTensorOps<Self> for Autodiff<B, C> 
             .stateful()
         {
             OpsKind::Tracked(prep) => prep.finish(
-                (
-                    dim,
-                    indices.clone(),
-                    B::float_shape(&tensor.primitive),
-                    B::float_shape(&value.primitive),
-                    B::float_device(&value.primitive),
-                ),
+                (dim, indices.clone()),
                 B::float_select_assign(tensor.primitive, dim, indices, value.primitive),
             ),
             OpsKind::UnTracked(prep) => prep.finish(B::float_select_assign(
@@ -2038,7 +2054,7 @@ impl<B: Backend, C: CheckpointStrategy> FloatTensorOps<Self> for Autodiff<B, C> 
                     .map(|node| node.id)
                     .collect()
             }
-            fn order(&self) -> usize {
+            fn depth(&self) -> usize {
                 self.output.order
             }
         }
@@ -2352,12 +2368,13 @@ impl<B: Backend, C: CheckpointStrategy> FloatTensorOps<Self> for Autodiff<B, C> 
         }
     }
 
+    #[cfg(any(feature = "wasm-sync", not(target_family = "wasm")))]
     fn float_sort<const D: usize>(
         tensor: FloatTensor<Self, D>,
         dim: usize,
         descending: bool,
     ) -> FloatTensor<Self, D> {
-        match SortDim
+        match super::sort::SortDim
             .prepare::<C>([tensor.node])
             .compute_bound()
             .stateful()
@@ -2374,12 +2391,13 @@ impl<B: Backend, C: CheckpointStrategy> FloatTensorOps<Self> for Autodiff<B, C> 
         }
     }
 
+    #[cfg(any(feature = "wasm-sync", not(target_family = "wasm")))]
     fn float_sort_with_indices<const D: usize>(
         tensor: FloatTensor<Self, D>,
         dim: usize,
         descending: bool,
     ) -> (FloatTensor<Self, D>, IntTensor<B, D>) {
-        match SortDim
+        match super::sort::SortDim
             .prepare::<C>([tensor.node])
             .compute_bound()
             .stateful()
@@ -2402,12 +2420,68 @@ impl<B: Backend, C: CheckpointStrategy> FloatTensorOps<Self> for Autodiff<B, C> 
         }
     }
 
+    #[cfg(any(feature = "wasm-sync", not(target_family = "wasm")))]
     fn float_argsort<const D: usize>(
         tensor: FloatTensor<Self, D>,
         dim: usize,
         descending: bool,
     ) -> IntTensor<B, D> {
         B::float_argsort(tensor.primitive, dim, descending)
+    }
+
+    fn float_repeat<const D: usize>(
+        tensor: FloatTensor<Self, D>,
+        dim: usize,
+        times: usize,
+    ) -> FloatTensor<Self, D> {
+        #[derive(Debug)]
+        struct Repeat;
+
+        #[derive(new, Debug)]
+        struct RetroRepeat<B: Backend, const D: usize> {
+            tensor_id: NodeID,
+            dim: usize,
+            times: usize,
+            _backend: PhantomData<B>,
+        }
+
+        impl<B: Backend, const D: usize> RetroForward for RetroRepeat<B, D> {
+            fn forward(&self, states: &mut BackwardStates, out_node: NodeID) {
+                let tensor = states.get_state::<B::FloatTensorPrimitive<D>>(&self.tensor_id);
+                let out = B::float_repeat(tensor, self.dim, self.times);
+                states.save(out_node, out)
+            }
+        }
+
+        impl<B: Backend, const D: usize> Backward<B, D, 1> for Repeat {
+            type State = usize;
+
+            fn backward(
+                self,
+                ops: Ops<Self::State, 1>,
+                grads: &mut Gradients,
+                _checkpointer: &mut Checkpointer,
+            ) {
+                let dim = ops.state;
+
+                unary::<B, D, D, _>(ops.parents, ops.node, grads, |grad| {
+                    B::float_sum_dim(grad, dim)
+                });
+            }
+        }
+
+        match Repeat
+            .prepare::<C>([tensor.node.clone()])
+            .memory_bound()
+            .retro_forward(RetroRepeat::<B, D>::new(tensor.node.id, dim, times))
+            .parents([&tensor])
+            .stateful()
+        {
+            OpsKind::Tracked(prep) => {
+                prep.finish(dim, B::float_repeat(tensor.primitive, dim, times))
+            }
+            OpsKind::UnTracked(prep) => prep.finish(B::float_repeat(tensor.primitive, dim, times)),
+        }
     }
 
     // TODO: Implement float_prod and float_sum

@@ -1,13 +1,14 @@
 use super::cat::cat_with_slice_assign;
+use super::repeat::repeat_with_slice_assign;
 use super::{BoolTensor, Device, FloatElem, FloatTensor, FullPrecisionBackend, IntElem, IntTensor};
 use crate::backend::BackendBridge;
+use crate::tensor::cast::ToElement;
 use crate::Tensor;
 use crate::{backend::Backend, tensor::Shape, Data, Distribution, ElementConversion, Float};
 use crate::{tensor::api::chunk, tensor::api::narrow};
 use alloc::vec::Vec;
 use burn_common::reader::Reader;
 use core::ops::Range;
-use num_traits::ToPrimitive;
 
 #[cfg(any(feature = "wasm-sync", not(target_family = "wasm")))]
 use crate::{argsort, sort, sort_with_indices};
@@ -193,28 +194,8 @@ pub trait FloatTensorOps<B: Backend> {
         dim: usize,
         times: usize,
     ) -> FloatTensor<B, D> {
-        let mut shape = B::float_shape(&tensor);
-        if shape.dims[dim] != 1 {
-            panic!("Can only repeat dimension with dim=1");
-        }
-        shape.dims[dim] = times;
-
-        let mut i = 0;
-        let indices_select_all = [0; D].map(|_| {
-            let start = 0;
-            let end = shape.dims[i];
-            i += 1;
-            start..end
-        });
-
-        let mut tensor_output = B::float_empty(shape, &B::float_device(&tensor));
-        for i in 0..times {
-            let mut indices = indices_select_all.clone();
-            indices[dim] = i..i + 1;
-            tensor_output = B::float_slice_assign(tensor_output, indices, tensor.clone());
-        }
-
-        tensor_output
+        repeat_with_slice_assign::<B, D, Float>(Tensor::<B, D>::from_primitive(tensor), dim, times)
+            .into_primitive()
     }
 
     /// Adds two tensors together.
@@ -382,6 +363,20 @@ pub trait FloatTensorOps<B: Backend> {
     ///
     /// The result of dividing the tensor by the scalar.
     fn float_div_scalar<const D: usize>(
+        lhs: FloatTensor<B, D>,
+        rhs: FloatElem<B>,
+    ) -> FloatTensor<B, D>;
+
+    /// Computes the modulus of a tensor given a scalar.
+    ///
+    /// # Arguments
+    /// * `lhs` - The left hand side tensor.
+    /// * `rhs` - The right hand side scalar.
+    ///
+    /// # Returns
+    ///
+    /// The result of applying the modulus of the scalar to the tensor.
+    fn float_remainder_scalar<const D: usize>(
         lhs: FloatTensor<B, D>,
         rhs: FloatElem<B>,
     ) -> FloatTensor<B, D>;
@@ -1010,7 +1005,7 @@ pub trait FloatTensorOps<B: Backend> {
         lhs: FloatTensor<B, D>,
         rhs: IntElem<B>,
     ) -> FloatTensor<B, D> {
-        Self::float_powf_scalar(lhs, rhs.to_f32().unwrap())
+        Self::float_powf_scalar(lhs, rhs.to_f32())
     }
 
     /// Returns a new tensor with values raised to the power of float `value`.

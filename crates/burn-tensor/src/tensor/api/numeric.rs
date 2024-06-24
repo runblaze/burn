@@ -6,7 +6,6 @@ use crate::{
     backend::Backend, check, check::TensorCheck, BasicOps, Bool, Distribution, Element,
     ElementConversion, Float, Int, Shape, Tensor, TensorKind,
 };
-use num_traits::Zero;
 
 impl<B, const D: usize, K> Tensor<B, D, K>
 where
@@ -61,7 +60,15 @@ where
     pub fn div_scalar<E: ElementConversion>(self, other: E) -> Self {
         Self::new(K::div_scalar(self.primitive, other))
     }
+
+    /// Applies element wise the remainder operation with a scalar.
     ///
+    /// `y = x2 % x1`
+    #[allow(clippy::should_implement_trait)]
+    pub fn remainder_scalar<E: ElementConversion>(self, other: E) -> Self {
+        Self::new(K::remainder_scalar(self.primitive, other))
+    }
+
     /// Applies element wise multiplication operation.
     ///
     /// `y = x2 * x1`
@@ -648,7 +655,7 @@ where
     ///
     /// A boolean tensor with the same shape as the input tensor.
     pub fn bool(self) -> Tensor<B, D, Bool> {
-        K::not_equal_elem::<D>(self.primitive, K::Elem::zero())
+        K::not_equal_elem::<D>(self.primitive, 0.elem())
     }
 
     /// Create a random tensor of the given shape on the given device where each element is
@@ -942,6 +949,31 @@ where
     /// For dividing a tensor by a scalar, users should prefer the [Tensor::div_scalar](Tensor::div_scalar) function,
     /// which is more high-level and designed for public use.
     fn div_scalar<const D: usize, E: ElementConversion>(
+        lhs: Self::Primitive<D>,
+        rhs: E,
+    ) -> Self::Primitive<D>;
+
+    /// Computes the modulus element-wise. The result has the same sign as the divisor rhs and its absolute value is
+    /// less than that of the divisor.
+    ///
+    /// # Arguments
+    ///
+    /// * `lhs` - The dividend.
+    /// * `rhs` - The divisor.
+    ///
+    /// # Returns
+    ///
+    /// The modulus of the input tensor with the divisor.
+    ///
+    /// # Remarks
+    ///
+    /// This is a low-level function used internally by the library to call different backend functions
+    /// with static dispatch. It is not designed for direct usage by users, and not recommended to import
+    /// or use this function directly.
+    ///
+    /// For performing the modulus operation, users should prefer the [Tensor::remainder_scalar](Tensor::remainder_scalar) function,
+    /// which is more high-level and designed for public use.
+    fn remainder_scalar<const D: usize, E: ElementConversion>(
         lhs: Self::Primitive<D>,
         rhs: E,
     ) -> Self::Primitive<D>;
@@ -2100,6 +2132,12 @@ impl<B: Backend> Numeric<B> for Int {
     ) -> Self::Primitive<D> {
         B::int_div_scalar(lhs, rhs.elem())
     }
+    fn remainder_scalar<const D: usize, E: ElementConversion>(
+        lhs: Self::Primitive<D>,
+        rhs: E,
+    ) -> Self::Primitive<D> {
+        B::int_remainder_scalar(lhs, rhs.elem())
+    }
     fn mul<const D: usize>(
         lhs: Self::Primitive<D>,
         rhs: Self::Primitive<D>,
@@ -2437,6 +2475,12 @@ impl<B: Backend> Numeric<B> for Float {
         rhs: E,
     ) -> Self::Primitive<D> {
         B::float_div_scalar(lhs, rhs.elem())
+    }
+    fn remainder_scalar<const D: usize, E: ElementConversion>(
+        lhs: Self::Primitive<D>,
+        rhs: E,
+    ) -> Self::Primitive<D> {
+        B::float_remainder_scalar(lhs, rhs.elem())
     }
     fn mul<const D: usize>(
         lhs: Self::Primitive<D>,
@@ -2820,6 +2864,20 @@ where
 
     fn div(self, other: E) -> Self {
         Tensor::div_scalar(self, other)
+    }
+}
+
+impl<E, const D: usize, B, K> core::ops::Rem<E> for Tensor<B, D, K>
+where
+    E: ElementConversion,
+    B: Backend,
+    K: Numeric<B>,
+    K::Elem: Element,
+{
+    type Output = Self;
+
+    fn rem(self, other: E) -> Self {
+        Tensor::remainder_scalar(self, other)
     }
 }
 

@@ -4,6 +4,8 @@
 macro_rules! include_models {
     ($($model:ident),*) => {
         $(
+            // Allow type complexity for generated code
+            #[allow(clippy::type_complexity)]
             pub mod $model {
                 include!(concat!(env!("OUT_DIR"), concat!("/model/", stringify!($model), ".rs")));
             }
@@ -15,8 +17,11 @@ macro_rules! include_models {
 include_models!(
     add_int,
     add,
+    argmax,
     avg_pool2d,
+    avg_pool1d,
     batch_norm,
+    cast,
     clip_opset16,
     clip_opset7,
     concat,
@@ -29,31 +34,64 @@ include_models!(
     equal,
     erf,
     exp,
+    expand,
     flatten,
     gather,
+    gather_elements,
     gelu,
     global_avr_pool,
+    layer_norm,
     leaky_relu,
     linear,
     log_softmax,
     log,
+    mask_where,
+    matmul,
+    min,
+    max,
+    maxpool1d,
     maxpool2d,
     mul,
     neg,
+    not,
+    greater,
+    greater_or_equal,
+    less,
+    less_or_equal,
+    prelu,
+    range,
     recip,
+    reduce_max,
+    reduce_min,
+    reduce_mean,
+    reduce_sum_opset13,
+    reduce_sum_opset11,
     relu,
     reshape,
+    resize,
+    shape,
     sigmoid,
+    sign,
+    sin,
+    slice,
     softmax,
     sqrt,
     sub_int,
     sub,
+    sum,
+    sum_int,
     tanh,
     transpose,
     conv_transpose2d,
     pow,
     pow_int,
-    unsqueeze
+    unsqueeze,
+    unsqueeze_opset16,
+    unsqueeze_opset11,
+    squeeze_opset16,
+    squeeze_opset13,
+    random_uniform,
+    random_normal
 );
 
 #[cfg(test)]
@@ -62,7 +100,7 @@ mod tests {
 
     use super::*;
 
-    use burn::tensor::{Data, Int, Shape, Tensor};
+    use burn::tensor::{Bool, Data, Int, Shape, Tensor};
 
     use float_cmp::ApproxEq;
 
@@ -127,6 +165,37 @@ mod tests {
 
         assert_eq!(output.to_data(), expected);
     }
+
+    #[test]
+    fn sum_tensor_and_tensor() {
+        let device = Default::default();
+        let model: sum::Model<Backend> = sum::Model::default();
+
+        let input1 = Tensor::<Backend, 1>::from_floats([1., 2., 3., 4.], &device);
+        let input2 = Tensor::<Backend, 1>::from_floats([1., 2., 3., 4.], &device);
+        let input3 = Tensor::<Backend, 1>::from_floats([1., 2., 3., 4.], &device);
+
+        let output = model.forward(input1, input2, input3);
+        let expected = Data::from([3., 6., 9., 12.]);
+
+        assert_eq!(output.to_data(), expected);
+    }
+
+    #[test]
+    fn sum_int_tensor_and_int_tensor() {
+        let device = Default::default();
+        let model: sum_int::Model<Backend> = sum_int::Model::default();
+
+        let input1 = Tensor::<Backend, 1, Int>::from_ints([1, 2, 3, 4], &device);
+        let input2 = Tensor::<Backend, 1, Int>::from_ints([1, 2, 3, 4], &device);
+        let input3 = Tensor::<Backend, 1, Int>::from_ints([1, 2, 3, 4], &device);
+
+        let output = model.forward(input1, input2, input3);
+        let expected = Data::from([3, 6, 9, 12]);
+
+        assert_eq!(output.to_data(), expected);
+    }
+
     #[test]
     fn mul_scalar_with_tensor_and_tensor_with_tensor() {
         // Initialize the model with weights (loaded from the exported file)
@@ -156,6 +225,61 @@ mod tests {
         let expected = Data::from([[[[1., 2., 2., 3.]]]]);
 
         assert_eq!(output.to_data(), expected);
+    }
+
+    #[test]
+    fn matmul() {
+        // Initialize the model with weights (loaded from the exported file)
+        let model: matmul::Model<Backend> = matmul::Model::default();
+
+        let device = Default::default();
+        let a = Tensor::<Backend, 1, Int>::arange(0..24, &device)
+            .reshape([1, 2, 3, 4])
+            .float();
+        let b = Tensor::<Backend, 1, Int>::arange(0..16, &device)
+            .reshape([1, 2, 4, 2])
+            .float();
+        let c = Tensor::<Backend, 1, Int>::arange(0..96, &device)
+            .reshape([2, 3, 4, 4])
+            .float();
+        let d = Tensor::<Backend, 1, Int>::arange(0..4, &device).float();
+
+        let (output_mm, output_mv, output_vm) = model.forward(a, b, c, d);
+        // matrix-matrix `a @ b`
+        let expected_mm = Data::from([[
+            [[28., 34.], [76., 98.], [124., 162.]],
+            [[604., 658.], [780., 850.], [956., 1042.]],
+        ]]);
+        // matrix-vector `c @ d` where the lhs vector is expanded and broadcasted to the correct dims
+        let expected_mv = Data::from([
+            [
+                [14., 38., 62., 86.],
+                [110., 134., 158., 182.],
+                [206., 230., 254., 278.],
+            ],
+            [
+                [302., 326., 350., 374.],
+                [398., 422., 446., 470.],
+                [494., 518., 542., 566.],
+            ],
+        ]);
+        // vector-matrix `d @ c` where the rhs vector is expanded and broadcasted to the correct dims
+        let expected_vm = Data::from([
+            [
+                [56., 62., 68., 74.],
+                [152., 158., 164., 170.],
+                [248., 254., 260., 266.],
+            ],
+            [
+                [344., 350., 356., 362.],
+                [440., 446., 452., 458.],
+                [536., 542., 548., 554.],
+            ],
+        ]);
+
+        assert_eq!(output_mm.to_data(), expected_mm);
+        assert_eq!(output_vm.to_data(), expected_vm);
+        assert_eq!(output_mv.to_data(), expected_mv);
     }
 
     #[test]
@@ -270,8 +394,22 @@ mod tests {
 
     #[test]
     fn gather() {
-        // Initialize the model with weights (loaded from the exported file)
         let model: gather::Model<Backend> = gather::Model::default();
+
+        let device = Default::default();
+
+        let input = Tensor::<Backend, 2>::from_floats([[1., 2., 3.], [4., 5., 6.]], &device);
+        let index = Tensor::<Backend, 1, Int>::from_ints([0, 2], &device);
+        let output = model.forward(input, index);
+        let expected = Data::from([[1., 3.], [4., 6.]]);
+
+        assert_eq!(output.to_data(), expected);
+    }
+
+    #[test]
+    fn gather_elements() {
+        // Initialize the model with weights (loaded from the exported file)
+        let model: gather_elements::Model<Backend> = gather_elements::Model::default();
 
         let device = Default::default();
         // Run the model
@@ -279,6 +417,20 @@ mod tests {
         let index = Tensor::<Backend, 2, Int>::from_ints([[0, 0], [1, 0]], &device);
         let output = model.forward(input, index);
         let expected = Data::from([[1., 1.], [4., 3.]]);
+
+        assert_eq!(output.to_data(), expected);
+    }
+
+    #[test]
+    fn argmax() {
+        // Initialize the model with weights (loaded from the exported file)
+        let model: argmax::Model<Backend> = argmax::Model::default();
+
+        let device = Default::default();
+        // Run the model
+        let input = Tensor::<Backend, 2>::from_floats([[1., 2., 3.], [4., 5., 6.]], &device);
+        let output = model.forward(input);
+        let expected = Data::from([[2], [2]]);
 
         assert_eq!(output.to_data(), expected);
     }
@@ -308,6 +460,24 @@ mod tests {
 
         assert!(expected_sum_1d.approx_eq(output_sum_1d, (1.0e-4, 2)));
         assert!(expected_sum_2d.approx_eq(output_sum_2d, (1.0e-4, 2)));
+    }
+
+    #[test]
+    fn slice() {
+        let model: slice::Model<Backend> = slice::Model::default();
+        let device = Default::default();
+
+        let input = Tensor::<Backend, 2>::from_floats(
+            [
+                [1., 2., 3., 4., 5., 6., 7., 8., 9., 10.],
+                [11., 12., 13., 14., 15., 16., 17., 18., 19., 20.],
+            ],
+            &device,
+        );
+        let output = model.forward(input);
+        let expected = Data::from([[1., 2., 3., 4., 5.]]);
+
+        assert_eq!(output.to_data(), expected);
     }
 
     #[test]
@@ -373,6 +543,60 @@ mod tests {
     }
 
     #[test]
+    fn min() {
+        let device = Default::default();
+
+        let model: min::Model<Backend> = min::Model::new(&device);
+        let input1 = Tensor::<Backend, 2>::from_floats([[-1.0, 42.0, 0.0, 42.0]], &device);
+        let input2 = Tensor::<Backend, 2>::from_floats([[2.0, 4.0, 42.0, 25.0]], &device);
+
+        let output = model.forward(input1, input2);
+        let expected = Data::from([[-1.0, 4.0, 0.0, 25.0]]);
+
+        assert_eq!(output.to_data(), expected);
+    }
+
+    #[test]
+    fn max() {
+        let device = Default::default();
+
+        let model: max::Model<Backend> = max::Model::new(&device);
+        let input1 = Tensor::<Backend, 2>::from_floats([[1.0, 42.0, 9.0, 42.0]], &device);
+        let input2 = Tensor::<Backend, 2>::from_floats([[42.0, 4.0, 42.0, 25.0]], &device);
+
+        let output = model.forward(input1, input2);
+        let expected = Data::from([[42.0, 42.0, 42.0, 42.0]]);
+
+        assert_eq!(output.to_data(), expected);
+    }
+
+    #[test]
+    fn maxpool1d() {
+        let device = Default::default();
+
+        let model: maxpool1d::Model<Backend> = maxpool1d::Model::new(&device);
+        let input = Tensor::<Backend, 3>::from_floats(
+            [[
+                [1.927, 1.487, 0.901, -2.106, 0.678],
+                [-1.235, -0.043, -1.605, -0.752, -0.687],
+                [-0.493, 0.241, -1.111, 0.092, -2.317],
+                [-0.217, -1.385, -0.396, 0.803, -0.622],
+                [-0.592, -0.063, -0.829, 0.331, -1.558],
+            ]],
+            &device,
+        );
+        let output = model.forward(input);
+        let expected = Data::from([[
+            [1.927, 1.927, 0.901],
+            [-0.043, -0.043, -0.687],
+            [0.241, 0.241, 0.092],
+            [-0.217, 0.803, 0.803],
+            [-0.063, 0.331, 0.331],
+        ]]);
+        assert_eq!(output.to_data(), expected);
+    }
+
+    #[test]
     fn maxpool2d() {
         // Initialize the model without weights (because the exported file does not contain them)
         let device = Default::default();
@@ -397,6 +621,53 @@ mod tests {
         ]]]);
 
         assert_eq!(output.to_data(), expected);
+    }
+
+    #[test]
+    fn avg_pool1d() {
+        // Initialize the model without weights (because the exported file does not contain them)
+        let device = Default::default();
+        let model: avg_pool1d::Model<Backend> = avg_pool1d::Model::new(&device);
+
+        // Run the model
+        let input = Tensor::<Backend, 3>::from_floats(
+            [[
+                [-1.526, -0.750, -0.654, -1.609, -0.100],
+                [-0.609, -0.980, -1.609, -0.712, 1.171],
+                [1.767, -0.095, 0.139, -1.579, -0.321],
+                [-0.299, 1.879, 0.336, 0.275, 1.716],
+                [-0.056, 0.911, -1.392, 2.689, -0.111],
+            ]],
+            &device,
+        );
+        let (output1, output2, output3) = model.forward(input.clone(), input.clone(), input);
+        let expected1 = Data::from([[[-1.135], [-0.978], [0.058], [0.548], [0.538]]]);
+        let expected2 = Data::from([[
+            [-0.569, -1.135, -0.591],
+            [-0.397, -0.978, -0.288],
+            [0.418, 0.058, -0.440],
+            [0.395, 0.548, 0.582],
+            [0.214, 0.538, 0.296],
+        ]]);
+        let expected3 = Data::from([[
+            [-1.138, -1.135, -0.788],
+            [-0.794, -0.978, -0.383],
+            [0.836, 0.058, -0.587],
+            [0.790, 0.548, 0.776],
+            [0.427, 0.538, 0.395],
+        ]]);
+
+        let expected_shape1 = Shape::from([1, 5, 1]);
+        let expected_shape2 = Shape::from([1, 5, 3]);
+        let expected_shape3 = Shape::from([1, 5, 3]);
+
+        assert_eq!(output1.shape(), expected_shape1);
+        assert_eq!(output2.shape(), expected_shape2);
+        assert_eq!(output3.shape(), expected_shape3);
+
+        output1.to_data().assert_approx_eq(&expected1, 3);
+        output2.to_data().assert_approx_eq(&expected2, 3);
+        output3.to_data().assert_approx_eq(&expected3, 3);
     }
 
     #[test]
@@ -443,6 +714,86 @@ mod tests {
     }
 
     #[test]
+    fn reduce_max() {
+        let device = Default::default();
+        let model: reduce_max::Model<Backend> = reduce_max::Model::new(&device);
+
+        // Run the model
+        let input = Tensor::<Backend, 4>::from_floats([[[[1.0, 4.0, 9.0, 25.0]]]], &device);
+        let (output_scalar, output_tensor, output_value) = model.forward(input.clone());
+        let expected_scalar = Data::from([25.]);
+        let expected = Data::from([[[[25.]]]]);
+
+        assert_eq!(output_scalar.to_data(), expected_scalar);
+        assert_eq!(output_tensor.to_data(), input.to_data());
+        assert_eq!(output_value.to_data(), expected);
+    }
+
+    #[test]
+    fn reduce_min() {
+        let device = Default::default();
+        let model: reduce_min::Model<Backend> = reduce_min::Model::new(&device);
+
+        // Run the models
+        let input = Tensor::<Backend, 4>::from_floats([[[[1.0, 4.0, 9.0, 25.0]]]], &device);
+        let (output_scalar, output_tensor, output_value) = model.forward(input.clone());
+        let expected_scalar = Data::from([1.]);
+        let expected = Data::from([[[[1.]]]]);
+
+        assert_eq!(output_scalar.to_data(), expected_scalar);
+        assert_eq!(output_tensor.to_data(), input.to_data());
+        assert_eq!(output_value.to_data(), expected);
+    }
+
+    #[test]
+    fn reduce_mean() {
+        let device = Default::default();
+        let model: reduce_mean::Model<Backend> = reduce_mean::Model::new(&device);
+
+        // Run the model
+        let input = Tensor::<Backend, 4>::from_floats([[[[1.0, 4.0, 9.0, 25.0]]]], &device);
+        let (output_scalar, output_tensor, output_value) = model.forward(input.clone());
+        let expected_scalar = Data::from([9.75]);
+        let expected = Data::from([[[[9.75]]]]);
+
+        assert_eq!(output_scalar.to_data(), expected_scalar);
+        assert_eq!(output_tensor.to_data(), input.to_data());
+        assert_eq!(output_value.to_data(), expected);
+    }
+
+    #[test]
+    fn reduce_sum_opset11() {
+        let device = Default::default();
+        let model: reduce_sum_opset11::Model<Backend> = reduce_sum_opset11::Model::new(&device);
+
+        // Run the model
+        let input = Tensor::<Backend, 4>::from_floats([[[[1.0, 4.0, 9.0, 25.0]]]], &device);
+        let (output_scalar, output_tensor, output_value) = model.forward(input.clone());
+        let expected_scalar = Data::from([39.]);
+        let expected = Data::from([[[[39.]]]]);
+
+        assert_eq!(output_scalar.to_data(), expected_scalar);
+        assert_eq!(output_tensor.to_data(), input.to_data());
+        assert_eq!(output_value.to_data(), expected);
+    }
+
+    #[test]
+    fn reduce_sum_opset13() {
+        let device = Default::default();
+        let model: reduce_sum_opset13::Model<Backend> = reduce_sum_opset13::Model::new(&device);
+
+        // Run the model
+        let input = Tensor::<Backend, 4>::from_floats([[[[1.0, 4.0, 9.0, 25.0]]]], &device);
+        let (output_scalar, output_tensor, output_value) = model.forward(input.clone());
+        let expected_scalar = Data::from([39.]);
+        let expected = Data::from([[[[39.]]]]);
+
+        assert_eq!(output_scalar.to_data(), expected_scalar);
+        assert_eq!(output_tensor.to_data(), input.to_data());
+        assert_eq!(output_value.to_data(), expected);
+    }
+
+    #[test]
     fn reshape() {
         // Initialize the model without weights (because the exported file does not contain them)
         let device = Default::default();
@@ -452,6 +803,43 @@ mod tests {
         let input = Tensor::<Backend, 1>::from_floats([0., 1., 2., 3.], &device);
         let output = model.forward(input);
         let expected = Data::from([[0., 1., 2., 3.]]);
+
+        assert_eq!(output.to_data(), expected);
+    }
+
+    #[test]
+    fn resize() {
+        // Initialize the model without weights (because the exported file does not contain them)
+        let device = Default::default();
+        let model: resize::Model<Backend> = resize::Model::new(&device);
+
+        // Run the model
+        let input = Tensor::<Backend, 4>::from_floats(
+            [[[
+                [0.0, 1.0, 2.0, 3.0],
+                [4.0, 5.0, 6.0, 7.0],
+                [8.0, 9.0, 10.0, 11.0],
+                [12.0, 13.0, 14.0, 15.0],
+            ]]],
+            &device,
+        );
+        let size = Tensor::<Backend, 1, Int>::from_ints([1, 1, 2, 3], &device);
+
+        let output = model.forward(input, size);
+        let expected = Data::from([[[[0.0, 1.5, 3.0], [12.0, 13.5, 15.0]]]]);
+
+        assert_eq!(output.to_data(), expected);
+    }
+
+    #[test]
+    fn shape() {
+        let device = Default::default();
+        let model: shape::Model<Backend> = shape::Model::new(&device);
+
+        // Run the model
+        let input = Tensor::<Backend, 2>::ones([4, 2], &device);
+        let output = model.forward(input);
+        let expected = Data::from([4, 2]);
 
         assert_eq!(output.to_data(), expected);
     }
@@ -487,6 +875,40 @@ mod tests {
     }
 
     #[test]
+    fn layer_norm() {
+        let device = Default::default();
+        let model: layer_norm::Model<Backend> = layer_norm::Model::default();
+
+        // Run the model with ones as input for easier testing
+        let input = Tensor::<Backend, 3>::from_floats(
+            [
+                [[0., 1., 2., 3.], [4., 5., 6., 7.], [8., 9., 10., 11.]],
+                [
+                    [12., 13., 14., 15.],
+                    [16., 17., 18., 19.],
+                    [20., 21., 22., 23.],
+                ],
+            ],
+            &device,
+        );
+        let output = model.forward(input);
+        let expected = Data::from([
+            [
+                [-1.3416, -0.4472, 0.4472, 1.3416],
+                [-1.3416, -0.4472, 0.4472, 1.3416],
+                [-1.3416, -0.4472, 0.4472, 1.3416],
+            ],
+            [
+                [-1.3416, -0.4472, 0.4472, 1.3416],
+                [-1.3416, -0.4472, 0.4472, 1.3416],
+                [-1.3416, -0.4472, 0.4472, 1.3416],
+            ],
+        ]);
+
+        output.to_data().assert_approx_eq(&expected, 4);
+    }
+
+    #[test]
     fn leaky_relu() {
         // Initialize the model without weights (because the exported file does not contain them)
         let device = Default::default();
@@ -504,6 +926,29 @@ mod tests {
         let expected = Data::from([
             [0.33669037, 0.0, 0.23446237],
             [0.23033303, -0.01122_856, -0.0018632829],
+        ]);
+
+        assert_eq!(output.to_data(), expected);
+    }
+
+    #[test]
+    fn prelu() {
+        // Initialize the model without weights (because the exported file does not contain them)
+        let device = Default::default();
+        let model: prelu::Model<Backend> = prelu::Model::new(&device);
+
+        // Run the model
+        let input = Tensor::<Backend, 2>::from_floats(
+            [
+                [0.33669037, 0.0, 0.23446237],
+                [0.23033303, -1.122_856, -0.18632829],
+            ],
+            &device,
+        );
+        let output = model.forward(input);
+        let expected = Data::from([
+            [0.33669037, 0.0, 0.23446237],
+            [0.23033303, -0.280714, -0.046582073],
         ]);
 
         assert_eq!(output.to_data(), expected);
@@ -556,24 +1001,42 @@ mod tests {
     }
 
     #[test]
+    fn sin() {
+        let device = Default::default();
+        let model: sin::Model<Backend> = sin::Model::new(&device);
+
+        let input = Tensor::<Backend, 4>::from_floats([[[[1.0, 4.0, 9.0, 25.0]]]], &device);
+
+        let output = model.forward(input);
+        let expected = Data::from([[[[0.8415, -0.7568, 0.4121, -0.1324]]]]);
+
+        output.to_data().assert_approx_eq(&expected, 4);
+    }
+
+    #[test]
     fn transpose() {
         // Initialize the model without weights (because the exported file does not contain them)
         let device = Default::default();
         let model: transpose::Model<Backend> = transpose::Model::new(&device);
 
         // Run the model
-        let input = Tensor::<Backend, 2>::from_floats(
+        let input = Tensor::<Backend, 3>::from_floats(
             [
-                [0.33669037, 0.128_809_4, 0.23446237],
-                [0.23033303, -1.122_856_4, -0.18632829],
+                [[0., 1., 2., 3.], [4., 5., 6., 7.], [8., 9., 10., 11.]],
+                [
+                    [12., 13., 14., 15.],
+                    [16., 17., 18., 19.],
+                    [20., 21., 22., 23.],
+                ],
             ],
             &device,
         );
         let output = model.forward(input);
         let expected = Data::from([
-            [0.33669037, 0.23033303],
-            [0.128_809_4, -1.122_856_4],
-            [0.23446237, -0.18632829],
+            [[0., 4., 8.], [12., 16., 20.]],
+            [[1., 5., 9.], [13., 17., 21.]],
+            [[2., 6., 10.], [14., 18., 22.]],
+            [[3., 7., 11.], [15., 19., 23.]],
         ]);
 
         assert_eq!(output.to_data(), expected);
@@ -718,6 +1181,21 @@ mod tests {
     }
 
     #[test]
+    fn range() {
+        let device = Default::default();
+        let model: range::Model<Backend> = range::Model::new(&device);
+
+        // Run the model
+        let start = 0i64;
+        let limit = 10i64;
+        let delta = 2i64;
+        let output = model.forward(start, limit, delta);
+
+        let expected = Data::from([0, 2, 4, 6, 8]);
+        assert_eq!(output.to_data(), expected);
+    }
+
+    #[test]
     fn recip() {
         // Initialize the model
         let device = Default::default();
@@ -781,6 +1259,19 @@ mod tests {
     }
 
     #[test]
+    fn expand() {
+        let device = Default::default();
+        let model: expand::Model<Backend> = expand::Model::new(&device);
+
+        let input1 = Tensor::<Backend, 2>::from_floats([[-1.0], [1.0]], &device);
+
+        let output = model.forward(input1);
+        let expected_shape = Shape::from([2, 2]);
+
+        assert_eq!(output.shape(), expected_shape);
+    }
+
+    #[test]
     fn gelu() {
         let device = Default::default();
         let model: gelu::Model<Backend> = gelu::Model::new(&device);
@@ -821,6 +1312,78 @@ mod tests {
         output1.to_data().assert_approx_eq(&expected1, 4);
 
         assert_eq!(output2, expected2);
+    }
+
+    #[test]
+    fn not() {
+        let device = Default::default();
+        let model: not::Model<Backend> = not::Model::new(&device);
+
+        let input = Tensor::<Backend, 4, Bool>::from_bool(
+            Data::from([[[[true, false, true, false]]]]),
+            &device,
+        );
+
+        let output = model.forward(input).to_data();
+        let expected = Data::from([[[[false, true, false, true]]]]);
+
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn greater() {
+        let device = Default::default();
+        let model: greater::Model<Backend> = greater::Model::new(&device);
+
+        let input1 = Tensor::<Backend, 2>::from_floats([[1.0, 4.0, 9.0, 25.0]], &device);
+        let input2 = Tensor::<Backend, 2>::from_floats([[1.0, 5.0, 8.0, -25.0]], &device);
+
+        let output = model.forward(input1, input2);
+        let expected = Data::from([[false, false, true, true]]);
+
+        assert_eq!(output.to_data(), expected);
+    }
+
+    #[test]
+    fn less() {
+        let device = Default::default();
+        let model: less::Model<Backend> = less::Model::new(&device);
+
+        let input1 = Tensor::<Backend, 2>::from_floats([[1.0, 4.0, 9.0, 25.0]], &device);
+        let input2 = Tensor::<Backend, 2>::from_floats([[1.0, 5.0, 8.0, -25.0]], &device);
+
+        let output = model.forward(input1, input2);
+        let expected = Data::from([[false, true, false, false]]);
+
+        assert_eq!(output.to_data(), expected);
+    }
+
+    #[test]
+    fn greater_or_equal() {
+        let device = Default::default();
+        let model: greater_or_equal::Model<Backend> = greater_or_equal::Model::new(&device);
+
+        let input1 = Tensor::<Backend, 2>::from_floats([[1.0, 4.0, 9.0, 25.0]], &device);
+        let input2 = Tensor::<Backend, 2>::from_floats([[1.0, 5.0, 8.0, -25.0]], &device);
+
+        let output = model.forward(input1, input2);
+        let expected = Data::from([[true, false, true, true]]);
+
+        assert_eq!(output.to_data(), expected);
+    }
+
+    #[test]
+    fn less_or_equal() {
+        let device = Default::default();
+        let model: less_or_equal::Model<Backend> = less_or_equal::Model::new(&device);
+
+        let input1 = Tensor::<Backend, 2>::from_floats([[1.0, 4.0, 9.0, 25.0]], &device);
+        let input2 = Tensor::<Backend, 2>::from_floats([[1.0, 5.0, 8.0, -25.0]], &device);
+
+        let output = model.forward(input1, input2);
+        let expected = Data::from([[true, true, false, false]]);
+
+        assert_eq!(output.to_data(), expected);
     }
 
     #[test]
@@ -876,5 +1439,148 @@ mod tests {
         let input = Tensor::ones(input_shape, &device);
         let output = model.forward(input);
         assert_eq!(output.shape(), expected_shape);
+    }
+
+    #[test]
+    fn unsqueeze_opset16() {
+        let device = Default::default();
+        let model = unsqueeze_opset16::Model::<Backend>::new(&device);
+        let input_shape = Shape::from([3, 4, 5]);
+        let expected_shape = Shape::from([3, 4, 5, 1]);
+        let input = Tensor::ones(input_shape, &device);
+        let output = model.forward(input, 1.0);
+        assert_eq!(expected_shape, output.0.shape());
+        assert_eq!(Shape::from([1]), output.1.shape());
+    }
+
+    #[test]
+    fn unsqueeze_opset11() {
+        let device = Default::default();
+        let model = unsqueeze_opset11::Model::<Backend>::new(&device);
+        let input_shape = Shape::from([3, 4, 5]);
+        let expected_shape = Shape::from([3, 4, 5, 1]);
+        let input = Tensor::ones(input_shape, &device);
+        let output = model.forward(input, 1.0);
+        assert_eq!(expected_shape, output.0.shape());
+        assert_eq!(Shape::from([1]), output.1.shape());
+    }
+
+    #[test]
+    fn cast() {
+        let device = Default::default();
+        let model: cast::Model<Backend> = cast::Model::new(&device);
+
+        let input_bool =
+            Tensor::<Backend, 2, Bool>::from_bool(Data::from([[true], [true]]), &device);
+        let input_int = Tensor::<Backend, 2, Int>::from_ints([[1], [1]], &device);
+        let input_float = Tensor::<Backend, 2>::from_floats([[1.], [1.]], &device);
+        let input_scalar = 1f32;
+
+        let (
+            output1,
+            output2,
+            output3,
+            output4,
+            output5,
+            output6,
+            output7,
+            output8,
+            output9,
+            output_scalar,
+        ) = model.forward(
+            input_bool.clone(),
+            input_int.clone(),
+            input_float.clone(),
+            input_scalar,
+        );
+        let expected_bool = input_bool.to_data();
+        let expected_int = input_int.to_data();
+        let expected_float = input_float.to_data();
+        let expected_scalar = 1;
+
+        assert_eq!(output1.to_data(), expected_bool);
+        assert_eq!(output2.to_data(), expected_int);
+        output3.to_data().assert_approx_eq(&expected_float, 4);
+
+        assert_eq!(output4.to_data(), expected_bool);
+        assert_eq!(output5.to_data(), expected_int);
+        output6.to_data().assert_approx_eq(&expected_float, 4);
+
+        assert_eq!(output7.to_data(), expected_bool);
+        assert_eq!(output8.to_data(), expected_int);
+        output9.to_data().assert_approx_eq(&expected_float, 4);
+
+        assert_eq!(output_scalar, expected_scalar);
+    }
+
+    #[test]
+    fn mask_where() {
+        let device = Default::default();
+        let model: mask_where::Model<Backend> = mask_where::Model::new(&device);
+
+        let x1 = Tensor::ones([2, 2], &device);
+        let y1 = Tensor::zeros([2, 2], &device);
+        let x2 = Tensor::ones([2], &device);
+        let y2 = Tensor::zeros([2], &device);
+        let mask = Tensor::from_bool([[true, false], [false, true]].into(), &device);
+
+        let (output, output_broadcasted) = model.forward(mask, x1, y1, x2, y2);
+        let expected = Data::from([[1.0, 0.0], [0.0, 1.0]]);
+
+        assert_eq!(output.to_data(), expected);
+        assert_eq!(output_broadcasted.to_data(), expected);
+    }
+
+    #[test]
+    fn sign() {
+        let device = Default::default();
+        let model: sign::Model<Backend> = sign::Model::new(&device);
+
+        let input = Tensor::<Backend, 4>::from_floats([[[[-1.0, 2.0, 0.0, -4.0]]]], &device);
+
+        let output = model.forward(input);
+        let expected = Data::from([[[[-1.0, 1.0, 0.0, -1.0]]]]);
+
+        output.to_data().assert_approx_eq(&expected, 4);
+    }
+
+    #[test]
+    fn squeeze_opset16() {
+        let device = Default::default();
+        let model = squeeze_opset16::Model::<Backend>::new(&device);
+        let input_shape = Shape::from([3, 4, 1, 5]);
+        let expected_shape = Shape::from([3, 4, 5]);
+        let input = Tensor::ones(input_shape, &device);
+        let output = model.forward(input);
+        assert_eq!(expected_shape, output.shape());
+    }
+
+    #[test]
+    fn squeeze_opset13() {
+        let device = Default::default();
+        let model = squeeze_opset13::Model::<Backend>::new(&device);
+        let input_shape = Shape::from([3, 4, 1, 5]);
+        let expected_shape = Shape::from([3, 4, 5]);
+        let input = Tensor::ones(input_shape, &device);
+        let output = model.forward(input);
+        assert_eq!(expected_shape, output.shape());
+    }
+
+    #[test]
+    fn random_uniform() {
+        let device = Default::default();
+        let model = random_uniform::Model::<Backend>::new(&device);
+        let expected_shape = Shape::from([2, 3]);
+        let output = model.forward();
+        assert_eq!(expected_shape, output.shape());
+    }
+
+    #[test]
+    fn random_normal() {
+        let device = Default::default();
+        let model = random_normal::Model::<Backend>::new(&device);
+        let expected_shape = Shape::from([2, 3]);
+        let output = model.forward();
+        assert_eq!(expected_shape, output.shape());
     }
 }

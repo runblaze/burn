@@ -1,30 +1,32 @@
 use crate::{
     compiler::wgsl,
     compute::{WgpuServer, WgpuStorage},
-    FloatElement, GraphicsApi, IntElement, WgpuDevice,
+    AutoGraphicsApi, GraphicsApi, WgpuDevice,
 };
 use alloc::sync::Arc;
 use burn_common::stub::RwLock;
 use burn_compute::{
     channel::MutexComputeChannel,
     client::ComputeClient,
-    memory_management::{DeallocStrategy, SimpleMemoryManagement, SliceStrategy},
+    memory_management::simple::{DeallocStrategy, SimpleMemoryManagement, SliceStrategy},
     tune::Tuner,
     ComputeRuntime,
 };
-use burn_jit::Runtime;
-use std::marker::PhantomData;
+use burn_cube::Runtime;
+use burn_jit::JitRuntime;
+use burn_tensor::backend::{DeviceId, DeviceOps};
+use std::sync::atomic::{AtomicBool, Ordering};
 use wgpu::{AdapterInfo, DeviceDescriptor};
 
-/// Runtime that uses the [wgpu] crate with the wgsl compiler.
-///
-/// The [graphics api](GraphicsApi), the [float element](FloatElement) and the
-/// [int element](IntElement) types are passed as generic.
+/// Runtime that uses the [wgpu] crate with the wgsl compiler. This is used in the Wgpu backend.
+/// For advanced configuration, use [`init_sync`] to pass in runtime options or to select a
+/// specific graphics API.
 #[derive(Debug)]
-pub struct WgpuRuntime<G: GraphicsApi, F: FloatElement, I: IntElement> {
-    _g: PhantomData<G>,
-    _f: PhantomData<F>,
-    _i: PhantomData<I>,
+pub struct WgpuRuntime {}
+
+impl JitRuntime for WgpuRuntime {
+    type JitDevice = WgpuDevice;
+    type JitServer = WgpuServer<SimpleMemoryManagement<WgpuStorage>>;
 }
 
 /// The compute instance is shared across all [wgpu runtimes](WgpuRuntime).
@@ -33,9 +35,10 @@ static RUNTIME: ComputeRuntime<WgpuDevice, Server, MutexComputeChannel<Server>> 
 
 type Server = WgpuServer<SimpleMemoryManagement<WgpuStorage>>;
 
-impl<G: GraphicsApi, F: FloatElement, I: IntElement> Runtime for WgpuRuntime<G, F, I> {
-    type FullPrecisionRuntime = WgpuRuntime<G, f32, i32>;
-    type Compiler = wgsl::WgslCompiler<F, I>;
+static SUBGROUP: AtomicBool = AtomicBool::new(false);
+
+impl Runtime for WgpuRuntime {
+    type Compiler = wgsl::WgslCompiler;
     type Server = WgpuServer<SimpleMemoryManagement<WgpuStorage>>;
 
     type Channel = MutexComputeChannel<WgpuServer<SimpleMemoryManagement<WgpuStorage>>>;
@@ -43,12 +46,37 @@ impl<G: GraphicsApi, F: FloatElement, I: IntElement> Runtime for WgpuRuntime<G, 
 
     fn client(device: &Self::Device) -> ComputeClient<Self::Server, Self::Channel> {
         RUNTIME.client(device, move || {
-            pollster::block_on(create_client::<G>(device, RuntimeOptions::default()))
+            let (adapter, device_wgpu, queue) =
+                pollster::block_on(create_wgpu_setup::<AutoGraphicsApi>(device));
+            create_client(adapter, device_wgpu, queue, RuntimeOptions::default())
         })
     }
 
     fn name() -> &'static str {
         "wgpu"
+    }
+
+    fn subcube() -> bool {
+        // TODO: assumes that all version of wgpu on the device will have the same features
+        // enabled.
+        SUBGROUP.load(Ordering::Relaxed)
+    }
+}
+
+impl DeviceOps for WgpuDevice {
+    fn id(&self) -> DeviceId {
+        match self {
+            WgpuDevice::DiscreteGpu(index) => DeviceId::new(0, *index as u32),
+            WgpuDevice::IntegratedGpu(index) => DeviceId::new(1, *index as u32),
+            WgpuDevice::VirtualGpu(index) => DeviceId::new(2, *index as u32),
+            WgpuDevice::Cpu => DeviceId::new(3, 0),
+            WgpuDevice::BestAvailable => DeviceId::new(4, 0),
+            // For an existing device, use the 64 bit wgpu device ID as the burn DeviceID.
+            // We're only storing 32 bits, so wrap the the 64 bit value to 32 bits. This
+            // might collide - but a 1 in 4 billion chance seems ok given there's only a few
+            // devices in flight at any time.
+            WgpuDevice::Existing(id) => DeviceId::new(5, (id.inner() % (u32::MAX as u64)) as u32),
+        }
     }
 }
 
@@ -59,72 +87,92 @@ pub struct RuntimeOptions {
     /// Control the slicing strategy.
     pub slice_strategy: SliceStrategy,
     /// Control the amount of compute tasks to be aggregated into a single GPU command.
-    pub max_tasks: usize,
+    pub tasks_max: usize,
 }
 
 impl Default for RuntimeOptions {
     fn default() -> Self {
-        let max_tasks = match std::env::var("BURN_WGPU_MAX_TASKS") {
+        const DEFAULT_MAX_TASKS: usize = 16;
+
+        let tasks_max = match std::env::var("BURN_WGPU_MAX_TASKS") {
             Ok(value) => value
                 .parse::<usize>()
                 .expect("BURN_WGPU_MAX_TASKS should be a positive integer."),
-            Err(_) => 64, // 64 tasks by default
+            Err(_) => DEFAULT_MAX_TASKS,
         };
 
         Self {
-            dealloc_strategy: DeallocStrategy::new_period_tick(max_tasks * 2),
+            dealloc_strategy: DeallocStrategy::new_period_tick(tasks_max * 2),
             slice_strategy: SliceStrategy::Ratio(0.8),
-            max_tasks,
+            tasks_max,
         }
     }
 }
 
-/// Init the client sync, useful to configure the runtime options.
+pub fn init_existing_device(
+    adapter: Arc<wgpu::Adapter>,
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
+    options: RuntimeOptions,
+) -> WgpuDevice {
+    let device_id = WgpuDevice::Existing(device.as_ref().global_id());
+    let client = create_client(adapter, device, queue, options);
+    RUNTIME.register(&device_id, client);
+    device_id
+}
+
+/// Initialize a client on the given device with the given options. This function is useful to configure the runtime options
+/// or to pick a different graphics API. On wasm, it is necessary to use [`init_async`] instead.
 pub fn init_sync<G: GraphicsApi>(device: &WgpuDevice, options: RuntimeOptions) {
-    let device = Arc::new(device);
-    let client = pollster::block_on(create_client::<G>(&device, options));
-
-    RUNTIME.register(&device, client)
+    pollster::block_on(init_async::<G>(device, options));
 }
 
-/// Init the client async, necessary for wasm.
+/// Like [`init_sync`], but async, necessary for wasm.
 pub async fn init_async<G: GraphicsApi>(device: &WgpuDevice, options: RuntimeOptions) {
-    let device = Arc::new(device);
-    let client = create_client::<G>(&device, options).await;
-
-    RUNTIME.register(&device, client)
+    let (adapter, device_wgpu, queue) = create_wgpu_setup::<G>(device).await;
+    let client = create_client(adapter, device_wgpu, queue, options);
+    RUNTIME.register(device, client)
 }
 
-async fn create_client<G: GraphicsApi>(
+async fn create_wgpu_setup<G: GraphicsApi>(
     device: &WgpuDevice,
+) -> (Arc<wgpu::Adapter>, Arc<wgpu::Device>, Arc<wgpu::Queue>) {
+    let (device_wgpu, queue, adapter) = select_device::<G>(device).await;
+
+    log::info!(
+        "Created wgpu compute server on device {:?} => {:?}",
+        device,
+        adapter.get_info()
+    );
+    (Arc::new(adapter), Arc::new(device_wgpu), Arc::new(queue))
+}
+
+fn create_client(
+    adapter: Arc<wgpu::Adapter>,
+    device_wgpu: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
     options: RuntimeOptions,
 ) -> ComputeClient<
     WgpuServer<SimpleMemoryManagement<WgpuStorage>>,
     MutexComputeChannel<WgpuServer<SimpleMemoryManagement<WgpuStorage>>>,
 > {
-    let (device_wgpu, queue, info) = select_device::<G>(device).await;
-
-    log::info!(
-        "Created wgpu compute server on device {:?} => {:?}",
-        device,
-        info
-    );
-
-    let device = Arc::new(device_wgpu);
-    let storage = WgpuStorage::new(device.clone());
+    let storage = WgpuStorage::new(device_wgpu.clone(), queue.clone());
     let memory_management =
         SimpleMemoryManagement::new(storage, options.dealloc_strategy, options.slice_strategy);
-    let server = WgpuServer::new(memory_management, device, queue, options.max_tasks);
+    let server = WgpuServer::new(memory_management, device_wgpu, queue, options.tasks_max);
     let channel = MutexComputeChannel::new(server);
+    let tuner_device_id = tuner_device_id(adapter.get_info());
 
-    let tuner_device_id = tuner_device_id(info);
-    ComputeClient::new(channel, Arc::new(RwLock::new(Tuner::new(&tuner_device_id))))
+    ComputeClient::new(
+        channel,
+        Arc::new(RwLock::new(Tuner::new("wgpu", &tuner_device_id))),
+    )
 }
 
 /// Select the wgpu device and queue based on the provided [device](WgpuDevice).
 pub async fn select_device<G: GraphicsApi>(
     device: &WgpuDevice,
-) -> (wgpu::Device, wgpu::Queue, wgpu::AdapterInfo) {
+) -> (wgpu::Device, wgpu::Queue, wgpu::Adapter) {
     #[cfg(target_family = "wasm")]
     let adapter = select_adapter::<G>(device).await;
 
@@ -132,13 +180,19 @@ pub async fn select_device<G: GraphicsApi>(
     let adapter = select_adapter::<G>(device);
 
     let limits = adapter.limits();
+    let features = adapter.features();
+
+    SUBGROUP.store(
+        features.contains(wgpu::Features::SUBGROUP),
+        Ordering::Relaxed,
+    );
 
     let (device, queue) = adapter
         .request_device(
             &DeviceDescriptor {
                 label: None,
-                features: wgpu::Features::empty(),
-                limits,
+                required_features: features,
+                required_limits: limits,
             },
             None,
         )
@@ -152,7 +206,7 @@ pub async fn select_device<G: GraphicsApi>(
         })
         .unwrap();
 
-    (device, queue, adapter.get_info())
+    (device, queue, adapter)
 }
 
 fn tuner_device_id(info: AdapterInfo) -> String {
@@ -179,6 +233,7 @@ fn select_adapter<G: GraphicsApi>(device: &WgpuDevice) -> wgpu::Adapter {
 
     instance
         .enumerate_adapters(G::backend().into())
+        .into_iter()
         .for_each(|adapter| {
             let device_type = adapter.get_info().device_type;
 
@@ -193,6 +248,9 @@ fn select_adapter<G: GraphicsApi>(device: &WgpuDevice) -> wgpu::Adapter {
                 WgpuDevice::VirtualGpu(_) => device_type == DeviceType::VirtualGpu,
                 WgpuDevice::Cpu => device_type == DeviceType::Cpu,
                 WgpuDevice::BestAvailable => true,
+                WgpuDevice::Existing(_) => {
+                    unreachable!("Cannot select an adapter for an existing device.")
+                }
             };
 
             if is_same_type {
@@ -278,6 +336,7 @@ fn select_adapter<G: GraphicsApi>(device: &WgpuDevice) -> wgpu::Adapter {
                 panic!("No adapter found for graphics API {:?}", G::default());
             }
         }
+        WgpuDevice::Existing(_) => unreachable!("Cannot select an adapter for an existing device."),
     };
 
     log::info!("Using adapter {:?}", adapter.get_info());

@@ -4,16 +4,21 @@ use crate::storage_id_type;
 storage_id_type!(StorageId);
 
 /// Defines if data uses a full memory chunk or a slice of it.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum StorageUtilization {
     /// Full memory chunk of specified size
     Full(usize),
     /// Slice of memory chunk with start index and size.
-    Slice(usize, usize),
+    Slice {
+        /// The offset in bytes from the chunk start.
+        offset: usize,
+        /// The size of the slice in bytes.
+        size: usize,
+    },
 }
 
 /// Contains the [storage id](StorageId) of a resource and the way it is used.
-#[derive(new)]
+#[derive(new, Clone, Debug)]
 pub struct StorageHandle {
     /// Storage id.
     pub id: StorageId,
@@ -26,7 +31,15 @@ impl StorageHandle {
     pub fn size(&self) -> usize {
         match self.utilization {
             StorageUtilization::Full(size) => size,
-            StorageUtilization::Slice(_, size) => size,
+            StorageUtilization::Slice { offset: _, size } => size,
+        }
+    }
+
+    /// Returns the size the handle is pointing to in memory.
+    pub fn offset(&self) -> usize {
+        match self.utilization {
+            StorageUtilization::Full(..) => panic!("full size slice not supported anymore"),
+            StorageUtilization::Slice { offset, .. } => offset,
         }
     }
 }
@@ -45,4 +58,7 @@ pub trait ComputeStorage: Send {
 
     /// Deallocates the memory pointed by the given storage id.
     fn dealloc(&mut self, id: StorageId);
+
+    /// Copy
+    fn copy(&mut self, from: &StorageHandle, to: &StorageHandle);
 }

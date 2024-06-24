@@ -121,10 +121,12 @@ impl<B: Backend, C: CheckpointStrategy> BoolTensorOps<Self> for Autodiff<B, C> {
         B::bool_flip(tensor, axes)
     }
 
+    #[cfg(any(feature = "wasm-sync", not(target_family = "wasm")))]
     fn bool_argwhere<const D: usize>(tensor: BoolTensor<B, D>) -> IntTensor<B, 2> {
         B::bool_argwhere(tensor)
     }
 
+    #[cfg(any(feature = "wasm-sync", not(target_family = "wasm")))]
     fn bool_nonzero<const D: usize>(tensor: BoolTensor<B, D>) -> Vec<IntTensor<B, 1>> {
         B::bool_nonzero(tensor)
     }
@@ -134,5 +136,13 @@ impl<B: Backend, C: CheckpointStrategy> BoolTensorOps<Self> for Autodiff<B, C> {
         shape: Shape<D2>,
     ) -> BoolTensor<B, D2> {
         B::bool_expand(tensor, shape)
+    }
+
+    fn bool_repeat<const D: usize>(
+        tensor: BoolTensor<B, D>,
+        dim: usize,
+        times: usize,
+    ) -> BoolTensor<B, D> {
+        B::bool_repeat(tensor, dim, times)
     }
 }

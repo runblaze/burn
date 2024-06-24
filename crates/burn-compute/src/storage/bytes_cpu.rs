@@ -34,7 +34,7 @@ impl BytesResource {
     fn get_exact_location_and_length(&self) -> (*mut u8, usize) {
         match self.utilization {
             StorageUtilization::Full(len) => (self.ptr, len),
-            StorageUtilization::Slice(location, len) => unsafe { (self.ptr.add(location), len) },
+            StorageUtilization::Slice { offset, size } => unsafe { (self.ptr.add(offset), size) },
         }
     }
 
@@ -90,6 +90,23 @@ impl ComputeStorage for BytesStorage {
             }
         }
     }
+
+    fn copy(&mut self, from: &StorageHandle, to: &StorageHandle) {
+        assert_eq!(from.size(), to.size());
+
+        let input = self.get(from);
+        let output = self.get(to);
+
+        for i in 0..from.size() {
+            let offset = i + from.offset();
+            let ptr_out = output.ptr.wrapping_add(offset);
+
+            let offset = i + to.offset();
+            let ptr_in = input.ptr.wrapping_add(offset);
+
+            unsafe { *ptr_in = *ptr_out }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -109,7 +126,13 @@ mod tests {
     fn test_slices() {
         let mut storage = BytesStorage::default();
         let handle_1 = storage.alloc(64);
-        let handle_2 = StorageHandle::new(handle_1.id.clone(), StorageUtilization::Slice(24, 8));
+        let handle_2 = StorageHandle::new(
+            handle_1.id.clone(),
+            StorageUtilization::Slice {
+                offset: 24,
+                size: 8,
+            },
+        );
 
         storage
             .get(&handle_1)

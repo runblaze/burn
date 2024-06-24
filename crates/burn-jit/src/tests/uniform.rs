@@ -10,20 +10,6 @@ mod tests {
 
     #[test]
     #[serial]
-    fn subsequent_calls_give_different_tensors() {
-        TestBackend::seed(0);
-        let shape = [4, 5];
-        let device = Default::default();
-
-        let tensor_1 = Tensor::<TestBackend, 2>::random(shape, Distribution::Default, &device);
-        let tensor_2 = Tensor::<TestBackend, 2>::random(shape, Distribution::Default, &device);
-        for i in 0..20 {
-            assert!(tensor_1.to_data().value[i] != tensor_2.to_data().value[i]);
-        }
-    }
-
-    #[test]
-    #[serial]
     fn values_all_within_interval_default() {
         TestBackend::seed(0);
         let shape = [24, 24];
@@ -116,5 +102,14 @@ mod tests {
         assert!(stats[0].count >= 1);
         assert!(stats[1].count >= 1);
         assert!(stats[2].count >= 1);
+    }
+
+    #[test]
+    fn should_not_fail_on_non_float_autotune() {
+        let device = Default::default();
+        let tensor_1 = Tensor::<TestBackend, 2>::from_floats([[1., 2., 3.], [3., 4., 5.]], &device);
+
+        // Autotune of all (reduce) on lower_equal_elem's output calls uniform distribution
+        tensor_1.lower_equal_elem(1.0).all();
     }
 }

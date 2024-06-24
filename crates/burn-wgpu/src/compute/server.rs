@@ -1,36 +1,36 @@
+use std::num::NonZeroU64;
+
 use super::WgpuStorage;
 use alloc::{borrow::Cow, sync::Arc};
 use burn_compute::{
     memory_management::MemoryManagement,
     server::{self, ComputeServer},
 };
-use burn_jit::compute::{JitAutotuneKey, Kernel, WorkGroup};
-use burn_tensor::Reader;
+use burn_cube::prelude::*;
+use burn_jit::JitAutotuneKey;
+use burn_tensor::{backend::SyncType, Reader};
 use hashbrown::HashMap;
 use wgpu::{
-    util::{BufferInitDescriptor, DeviceExt},
+    util::{BufferInitDescriptor, DeviceExt, StagingBelt},
     BindGroup, CommandEncoder, ComputePipeline, ShaderModuleDescriptor,
 };
+
+// Allocations with existing data smaller than this can use a staging belt
+// which speeds up the allocation. A higher number here will catch more
+// allocations, but can also increase memory usage.
+const SMALL_ALLOC_SIZE: usize = 512;
 
 /// Wgpu compute server.
 #[derive(Debug)]
 pub struct WgpuServer<MM: MemoryManagement<WgpuStorage>> {
     memory_management: MM,
     device: Arc<wgpu::Device>,
-    queue: wgpu::Queue,
+    queue: Arc<wgpu::Queue>,
     encoder: CommandEncoder,
+    staging_belt: StagingBelt,
     pipelines: HashMap<String, Arc<ComputePipeline>>,
-    tasks: Vec<ComputeTask>,
-    max_tasks: usize,
-    manual_available: HashMap<usize, Vec<server::Handle<Self>>>,
-    manual_taken: Vec<(usize, server::Handle<Self>)>,
-}
-
-#[derive(new, Debug)]
-struct ComputeTask {
-    pipeline: Arc<ComputePipeline>,
-    bind_group: BindGroup,
-    work_group: WorkGroup,
+    tasks_max: usize,
+    tasks_count: usize,
 }
 
 impl<MM> WgpuServer<MM>
@@ -41,8 +41,8 @@ where
     pub fn new(
         memory_management: MM,
         device: Arc<wgpu::Device>,
-        queue: wgpu::Queue,
-        max_tasks: usize,
+        queue: Arc<wgpu::Queue>,
+        tasks_max: usize,
     ) -> Self {
         let encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Command Encoder"),
@@ -53,74 +53,19 @@ where
             device,
             queue,
             encoder,
+            staging_belt: StagingBelt::new(SMALL_ALLOC_SIZE as u64),
             pipelines: HashMap::new(),
-            tasks: Vec::new(),
-            max_tasks,
-            manual_available: HashMap::new(),
-            manual_taken: Vec::new(),
+            tasks_max,
+            tasks_count: 0,
         }
     }
 
-    fn submit(&mut self) {
-        assert!(
-            self.tasks.is_empty(),
-            "Tasks should be completed before submitting the current encoder."
-        );
-        let mut new_encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        core::mem::swap(&mut new_encoder, &mut self.encoder);
-
-        self.queue.submit(Some(new_encoder.finish()));
-
-        // Cleanup allocations and deallocations.
-        self.free_manual_allocations();
-        self.memory_management.storage().perform_deallocations();
-    }
-
-    fn free_manual_allocations(&mut self) {
-        let mut manual_taken_tmp = Vec::new();
-        core::mem::swap(&mut manual_taken_tmp, &mut self.manual_taken);
-
-        for (size, handle) in manual_taken_tmp.drain(..) {
-            if handle.can_mut() {
-                self.register_manual(size, handle);
-            } else {
-                self.manual_taken.push((size, handle));
-            }
-        }
-    }
-
-    // Finds a free, manually-added handle of specified size, or creates it if none is found
-    fn manual_reserve(&mut self, size: usize) -> server::Handle<Self> {
-        let handle = self
-            .manual_available
-            .get_mut(&size)
-            .and_then(|h| h.pop())
-            .unwrap_or_else(|| {
-                let memory = self.memory_management.alloc(size);
-                server::Handle::new(memory)
-            });
-
-        self.manual_taken.push((size, handle.clone()));
-
-        handle
-    }
-
-    // Manually adds a handle of given size
-    fn register_manual(&mut self, size: usize, handle: server::Handle<Self>) {
-        if let Some(handles) = self.manual_available.get_mut(&size) {
-            handles.push(handle);
-        } else {
-            self.manual_available.insert(size, [handle].into());
-        }
-    }
-
-    fn register_tasks(&mut self) {
-        if self.tasks.is_empty() {
-            return;
-        }
-
+    fn register_compute(
+        &mut self,
+        pipeline: Arc<ComputePipeline>,
+        bind_group: BindGroup,
+        work_group: CubeCount,
+    ) {
         let mut compute = self
             .encoder
             .begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -128,24 +73,23 @@ where
                 timestamp_writes: None,
             });
 
-        for task in self.tasks.iter() {
-            compute.set_pipeline(&task.pipeline);
-            compute.set_bind_group(0, &task.bind_group, &[]);
-            compute.dispatch_workgroups(task.work_group.x, task.work_group.y, task.work_group.z);
-        }
+        compute.set_pipeline(&pipeline);
+        compute.set_bind_group(0, &bind_group, &[]);
+        compute.dispatch_workgroups(work_group.x, work_group.y, work_group.z);
 
-        std::mem::drop(compute);
-        self.tasks.clear();
+        self.tasks_count += 1;
     }
 
-    fn pipeline(&mut self, kernel: Kernel) -> Arc<ComputePipeline> {
+    fn pipeline(&mut self, kernel: Box<dyn CubeTask>) -> Arc<ComputePipeline> {
         let kernel_id = kernel.id();
+
         if let Some(pipeline) = self.pipelines.get(&kernel_id) {
             return pipeline.clone();
         }
 
-        let source = kernel.compile().source;
-        let pipeline = self.compile_source(&source);
+        let compile = kernel.compile();
+        let pipeline = self.compile_source(&compile.source);
+
         self.pipelines.insert(kernel_id.clone(), pipeline.clone());
 
         pipeline
@@ -164,15 +108,13 @@ where
                     layout: None,
                     module: &module,
                     entry_point: "main",
+                    compilation_options: Default::default(),
                 }),
         )
     }
 
-    fn buffer_reader(&mut self, handle: &server::Handle<Self>) -> BufferReader {
-        // Register previous tasks before reading the buffer so that it is up to date.
-        self.register_tasks();
-
-        let resource = self.memory_management.get(&handle.memory);
+    fn buffer_reader(&mut self, handle: server::Binding<Self>) -> BufferReader {
+        let resource = self.memory_management.get(handle.memory);
 
         let size = resource.size();
         let buffer_dest = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -189,8 +131,9 @@ where
             0,
             size,
         );
+        self.tasks_count += 1;
 
-        self.submit();
+        self.sync(SyncType::Flush);
 
         BufferReader::new(buffer_dest)
     }
@@ -242,20 +185,27 @@ impl<MM> ComputeServer for WgpuServer<MM>
 where
     MM: MemoryManagement<WgpuStorage>,
 {
-    type Kernel = Kernel;
+    type Kernel = Box<dyn CubeTask>;
     type Storage = WgpuStorage;
     type MemoryManagement = MM;
     type AutotuneKey = JitAutotuneKey;
 
-    fn read(&mut self, handle: &server::Handle<Self>) -> Reader<Vec<u8>> {
+    fn read(&mut self, binding: server::Binding<Self>) -> Reader<Vec<u8>> {
         #[cfg(target_family = "wasm")]
         {
-            let future = self.buffer_reader(handle).read(self.device.clone());
+            let future = self.buffer_reader(binding).read(self.device.clone());
             return Reader::Future(Box::pin(future));
         }
 
         #[cfg(not(target_family = "wasm"))]
-        Reader::Concrete(self.buffer_reader(handle).read(&self.device))
+        Reader::Concrete(self.buffer_reader(binding).read(&self.device))
+    }
+
+    fn get_resource(
+        &mut self,
+        binding: server::Binding<Self>,
+    ) -> <Self::Storage as burn_compute::storage::ComputeStorage>::Resource {
+        self.memory_management.get(binding.memory)
     }
 
     /// When we create a new handle from existing data, we use custom allocations so that we don't
@@ -264,42 +214,81 @@ where
     /// This is important, otherwise the compute passes are going to be too small and we won't be able to
     /// fully utilize the GPU.
     fn create(&mut self, data: &[u8]) -> server::Handle<Self> {
-        let handle = self.manual_reserve(data.len());
-
-        let buffer_src = Arc::new(self.device.create_buffer_init(&BufferInitDescriptor {
-            label: Some("Buffer Src"),
-            contents: data,
-            usage: wgpu::BufferUsages::COPY_SRC,
+        let handle = server::Handle::new(self.memory_management.reserve(data.len(), || {
+            flush_tasks(
+                &mut self.encoder,
+                &self.queue,
+                &self.device,
+                &mut self.tasks_count,
+                &mut self.staging_belt,
+            );
+            self.device.poll(wgpu::Maintain::Wait);
         }));
 
-        let resource = self.memory_management.get(&handle.memory);
+        let non_zero_len = NonZeroU64::new(data.len() as u64);
 
-        self.encoder.copy_buffer_to_buffer(
-            &buffer_src,
-            0,
-            &resource.buffer,
-            resource.offset(),
-            buffer_src.size(),
-        );
+        // If there's nothing to copy, don't need to do any work here.
+        if let Some(len) = non_zero_len {
+            let binding = handle.clone().binding();
+            let resource = self.memory_management.get(binding.memory);
+
+            if data.len() < SMALL_ALLOC_SIZE {
+                // Use a staging belt if the allocation is small enough. This is faster than allocating a new buffer.
+                // Ideally, we could use queue.write_buffer_with(), which seems to be the recommended method for performance,
+                // but that doesn't seem to work, as we might re-use a buffer multiple times, and need to schedule this
+                // precisely in the encoder.
+                let mut write_buf = self.staging_belt.write_buffer(
+                    &mut self.encoder,
+                    &resource.buffer,
+                    resource.offset(),
+                    len,
+                    &self.device,
+                );
+                write_buf.copy_from_slice(data);
+            } else {
+                let buffer_src = Arc::new(self.device.create_buffer_init(&BufferInitDescriptor {
+                    label: Some("Buffer Src"),
+                    contents: data,
+                    usage: wgpu::BufferUsages::COPY_SRC,
+                }));
+                self.encoder.copy_buffer_to_buffer(
+                    &buffer_src,
+                    0,
+                    &resource.buffer,
+                    resource.offset(),
+                    buffer_src.size(),
+                );
+            }
+            self.tasks_count += 1;
+        }
 
         handle
     }
 
     fn empty(&mut self, size: usize) -> server::Handle<Self> {
-        server::Handle::new(self.memory_management.reserve(size))
+        server::Handle::new(self.memory_management.reserve(size, || {
+            flush_tasks(
+                &mut self.encoder,
+                &self.queue,
+                &self.device,
+                &mut self.tasks_count,
+                &mut self.staging_belt,
+            );
+            self.device.poll(wgpu::Maintain::Wait);
+        }))
     }
 
-    fn execute(&mut self, kernel: Self::Kernel, handles: &[&server::Handle<Self>]) {
-        let work_group = kernel.launch_settings().workgroup;
+    fn execute(&mut self, kernel: Self::Kernel, bindings: Vec<server::Binding<Self>>) {
+        let work_group = kernel.launch_settings().cube_count;
         let pipeline = self.pipeline(kernel);
         let group_layout = pipeline.get_bind_group_layout(0);
 
-        let handles = handles
-            .iter()
-            .map(|handle| self.memory_management.get(&handle.memory))
+        let memory_handles = bindings
+            .into_iter()
+            .map(|binding| self.memory_management.get(binding.memory))
             .collect::<Vec<_>>();
 
-        let entries = handles
+        let entries = memory_handles
             .iter()
             .enumerate()
             .map(|(i, buffer)| wgpu::BindGroupEntry {
@@ -314,21 +303,49 @@ where
             entries: &entries,
         });
 
-        self.tasks
-            .push(ComputeTask::new(pipeline, bind_group, work_group));
+        self.register_compute(pipeline, bind_group, work_group);
 
-        if self.tasks.len() >= self.max_tasks {
-            self.register_tasks();
-            self.submit();
+        if self.tasks_count >= self.tasks_max {
+            self.sync(SyncType::Flush);
         }
     }
 
-    fn sync(&mut self) {
-        if !self.tasks.is_empty() {
-            self.register_tasks();
-            self.submit();
-        }
+    fn sync(&mut self, sync_type: SyncType) {
+        flush_tasks(
+            &mut self.encoder,
+            &self.queue,
+            &self.device,
+            &mut self.tasks_count,
+            &mut self.staging_belt,
+        );
 
-        self.device.poll(wgpu::Maintain::Wait);
+        // Cleanup allocations and deallocations.
+        self.memory_management.storage().perform_deallocations();
+
+        if sync_type == SyncType::Wait {
+            self.device.poll(wgpu::Maintain::Wait);
+        }
     }
+}
+
+/// Flush tasks using the [command encoder](CommandEncoder).
+///
+/// This implementation is decoupled from both the [server](WgpuServer) and [memory management](MemoryManagement).
+/// This decoupling allows for safe usage within sync callbacks when allocating memory buffers.
+fn flush_tasks(
+    encoder: &mut CommandEncoder,
+    queue: &wgpu::Queue,
+    device: &wgpu::Device,
+    tasks_count: &mut usize,
+    staging_belt: &mut StagingBelt,
+) {
+    staging_belt.finish();
+
+    let mut new_encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    core::mem::swap(&mut new_encoder, encoder);
+
+    queue.submit(Some(new_encoder.finish()));
+    *tasks_count = 0;
+    staging_belt.recall();
 }

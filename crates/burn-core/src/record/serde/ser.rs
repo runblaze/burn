@@ -16,7 +16,7 @@ use serde::{
 /// the actual serialization of modules (although it could be used for that as well if all
 /// primitive types are implemented).
 pub struct Serializer {
-    // The state of the serialization process
+    /// The state of the serialization process
     state: Option<NestedValue>,
 }
 
@@ -52,13 +52,13 @@ impl SerializerTrait for Serializer {
         Ok(self)
     }
 
-    fn serialize_newtype_struct<T: ?Sized>(
+    fn serialize_newtype_struct<T>(
         self,
         _name: &'static str,
         value: &T,
     ) -> Result<Self::Ok, Self::Error>
     where
-        T: Serialize,
+        T: Serialize + ?Sized,
     {
         value.serialize(self)
     }
@@ -128,9 +128,9 @@ impl SerializerTrait for Serializer {
         unimplemented!()
     }
 
-    fn serialize_some<T: ?Sized>(self, value: &T) -> Result<Self::Ok, Self::Error>
+    fn serialize_some<T>(self, value: &T) -> Result<Self::Ok, Self::Error>
     where
-        T: Serialize,
+        T: Serialize + ?Sized,
     {
         value.serialize(self)
     }
@@ -152,7 +152,7 @@ impl SerializerTrait for Serializer {
         unimplemented!()
     }
 
-    fn serialize_newtype_variant<T: ?Sized>(
+    fn serialize_newtype_variant<T>(
         self,
         _name: &'static str,
         _variant_index: u32,
@@ -160,7 +160,7 @@ impl SerializerTrait for Serializer {
         _value: &T,
     ) -> Result<Self::Ok, Self::Error>
     where
-        T: Serialize,
+        T: Serialize + ?Sized,
     {
         unimplemented!()
     }
@@ -207,13 +207,9 @@ impl SerializeStruct for Serializer {
     type Ok = NestedValue;
     type Error = Error;
 
-    fn serialize_field<T: ?Sized>(
-        &mut self,
-        key: &'static str,
-        value: &T,
-    ) -> Result<(), Self::Error>
+    fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Self::Error>
     where
-        T: Serialize,
+        T: Serialize + ?Sized,
     {
         let serialized_value = value.serialize(Serializer::new())?;
 
@@ -248,9 +244,9 @@ impl SerializeSeq for Serializer {
     type Ok = NestedValue;
     type Error = Error;
 
-    fn serialize_element<T: ?Sized>(&mut self, value: &T) -> Result<(), Self::Error>
+    fn serialize_element<T>(&mut self, value: &T) -> Result<(), Self::Error>
     where
-        T: Serialize,
+        T: Serialize + ?Sized,
     {
         let serialized_value = value.serialize(Serializer::new())?;
 
@@ -258,11 +254,30 @@ impl SerializeSeq for Serializer {
             Some(NestedValue::Vec(ref mut vec)) => {
                 vec.push(serialized_value); // Inserting into the state
             }
+            Some(NestedValue::U16s(ref mut vec)) => {
+                if let NestedValue::U16(val) = serialized_value {
+                    vec.push(val);
+                } else {
+                    panic!("Invalid value type encountered");
+                }
+            }
+            Some(NestedValue::F32s(ref mut vec)) => {
+                if let NestedValue::F32(val) = serialized_value {
+                    vec.push(val);
+                } else {
+                    panic!("Invalid value type encountered");
+                }
+            }
             Some(_) => {
                 panic!("Invalid state encountered");
             }
             None => {
-                self.state = Some(NestedValue::Vec(vec![serialized_value]));
+                let val = match serialized_value {
+                    NestedValue::U16(val) => NestedValue::U16s(vec![val]),
+                    NestedValue::F32(val) => NestedValue::F32s(vec![val]),
+                    _ => NestedValue::Vec(vec![serialized_value]),
+                };
+                self.state = Some(val);
             }
         }
 
@@ -335,7 +350,6 @@ mod tests {
         // the order of the fields is not guaranteed for HashMaps.
         assert_eq!(serialized_str.len(), 135);
     }
-
     #[test]
     fn test_param_serde() {
         type Backend = burn_ndarray::NdArray<f32>;
@@ -356,6 +370,6 @@ mod tests {
 
         // Compare the lengths of expected and actual serialized strings because
         // the order of the fields is not guaranteed for HashMaps.
-        assert_eq!(serialized_str.len(), 149);
+        assert_eq!(serialized_str.len(), 134);
     }
 }
