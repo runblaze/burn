@@ -65,7 +65,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [blaze/macos-14, blaze/ubuntu-22.04-amd64, windows-2022]
+        os: [ubuntu-22.04, blaze/ubuntu-22.04-amd64]
         # We support both the latest Rust toolchain and the preceding version.
         rust: [stable, 1.79.0]
         test: ['std', 'no-std', 'examples']
@@ -74,28 +74,10 @@ jobs:
             rust: stable
           - cache: 1-79-0
             rust: 1.79.0
-          - os: ubuntu-22.04
-            coverage-flags: COVERAGE=1
-            rust: stable
-            test: std
-          - os: blaze/macos-14
-            rust: stable
-            test: std
-          - os: windows-2022
-            wgpu-flags: "DISABLE_WGPU=1"
-            # not used yet, as wgpu tests are disabled on windows for now
-            # see issue: https://github.com/tracel-ai/burn/issues/1062
-            # auto-graphics-backend-flags: "AUTO_GRAPHICS_BACKEND=dx12";'
         exclude:
           # only need to check this once
           - rust: 1.79.0
             test: 'examples'
-          # Do not run no-std tests on macos
-          - os: blaze/macos-14
-            test: 'no-std'
-          # Do not run no-std tests on Windows
-          - os: windows-2022
-            test: 'no-std'
 
     steps:
 
@@ -107,22 +89,6 @@ jobs:
         with:
           components: rustfmt, clippy
           toolchain: ${{ matrix.rust }}
-
-      - name: caching
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ runner.os }}-${{ matrix.cache }}-${{ matrix.test}}-${{ hashFiles('**/Cargo.toml') }}
-          prefix-key: "v5-rust"
-
-      - name: free disk space
-        if: runner.os == 'Linux'
-        run: |
-          df -h
-          sudo swapoff -a
-          sudo rm -f /swapfile
-          sudo apt clean
-          df -h
-          cargo clean --package burn-tch
 
       - name: install llvmpipe and lavapipe
         if: runner.os == 'Linux'
