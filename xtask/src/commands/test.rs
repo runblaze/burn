@@ -8,6 +8,9 @@ pub struct BurnTestCmdArgs {
     /// Test in CI mode which excludes unsupported crates.
     #[arg(long)]
     pub ci: bool,
+    /// Test in GPU mode which includes the burn-cuda crate.
+    #[arg(long)]
+    pub gpu: bool,
 }
 
 pub(crate) fn handle_command(
@@ -32,8 +35,8 @@ pub(crate) fn handle_command(
             Ok(())
         }
         ExecutionEnvironment::Std => {
-            if args.ci {
-                // Exclude crates that are not supported on CI
+            if args.ci && !args.gpu {
+                // Exclude crates that are not supported on CI without a GPU
                 args.exclude
                     .extend(vec!["burn-cuda".to_string(), "burn-tch".to_string()]);
             }
@@ -108,6 +111,7 @@ pub(crate) fn handle_command(
                         threads: args.threads,
                         jobs: args.jobs,
                         ci: args.ci,
+                        gpu: args.gpu,
                     },
                     env,
                 )
